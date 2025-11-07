@@ -1,0 +1,31 @@
+# IRサイト評価ツール - 依存ライブラリ
+
+# ブラウザ自動化
+playwright>=1.41.0
+
+# LLM API
+anthropic>=0.40.0
+openai==1.54.0
+
+# データ処理
+pandas>=2.2.0
+openpyxl==3.1.0
+
+# ユーティリティ
+pyyaml>=6.0.1
+python-dotenv==1.0.0
+tqdm==4.66.0
+requests==2.31.0
+
+# ログ
+loguru==0.7.2
+
+# HTML解析
+beautifulsoup4==4.12.0
+lxml>=5.1.0
+
+# アクセシビリティ検証
+axe-selenium-python==2.1.6
+
+# 日付処理
+python-dateutil==2.8.2

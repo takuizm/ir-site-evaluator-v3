@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 環境変数（機密情報）
+.env
+
+# 実行結果
+output/*
+!output/.gitkeep
+checkpoint/*
+!checkpoint/.gitkeep
+.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.bak
+
+# ログ・一時ファイル
+*.log
+*.tmp
+*.temp
+
+# 開発用ツール・設定
+.serena/
+.claude/
+
+# バックアップ
+*.backup
+*_backup_*
+
+# 開発用ドキュメント（納品不要）
+CLEANUP_PLAN.md
+TODO.md

@@ -1,0 +1,11 @@
+site_id,company_name,url,industry,note
+1,トヨタ自動車,https://global.toyota/jp/ir/,製造業（自動車）,世界的企業・充実したIR
+2,ソニーグループ,https://www.sony.com/ja/SonyInfo/IR/,電機・エレクトロニクス,グローバル企業・英語IR充実
+3,三菱UFJフィナンシャル・グループ,https://www.mufg.jp/ir/,金融（銀行）,メガバンク・IR情報豊富
+4,ソフトバンクグループ,https://group.softbank/ir,通信・投資,IR動画コンテンツ充実
+5,KDDI,https://www.kddi.com/corporate/ir/,通信,個人投資家向けページ充実
+6,パナソニック ホールディングス,https://holdings.panasonic/jp/corporate/investors.html,電機・エレクトロニクス,統合報告書HTML版あり
+7,キーエンス,https://www.keyence.co.jp/investor/,製造業（精密機器）,シンプルなIR構成
+8,ファーストリテイリング,https://www.fastretailing.com/jp/ir/,小売,サステナビリティ情報充実
+9,東京エレクトロン,https://www.tel.co.jp/ir/,製造業（半導体）,技術系IR情報充実
+10,リクルートホールディングス,https://recruit-holdings.com/ja/ir/,サービス業,ESG・人材データ充実
