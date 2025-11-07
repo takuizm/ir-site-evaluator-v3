@@ -54,7 +54,7 @@ output:
 
 # 入力設定
 input:
-  sites_list: "input/sites_test.csv"  # 1社テスト（Sony）
+  sites_list: "input/sample_sites.csv"  # デフォルト同梱サンプルサイト
   validation_items: "input/validation_items.csv"  # 2025年版 249項目
 
 # パフォーマンス設定
