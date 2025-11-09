@@ -76,7 +76,7 @@ class LLMValidator:
         """
         self.llm_client = llm_client
         self.logger = logger
-        self.max_context_chars = 15000
+        self.max_context_chars = 30000
 
     async def validate(self, site: Site, page: Page, item: ValidationItem, checked_url: str) -> ValidationResult:
         """LLM検証を実行する
@@ -121,7 +121,7 @@ class LLMValidator:
             self.logger.error(f"LLM validation error for item {item.item_id}: {e}")
             return self._create_error_result(site, item, str(e), checked_url)
 
-    def preprocess_html(self, html: str, max_chars: int = 15000) -> str:
+    def preprocess_html(self, html: str, max_chars: int = 30000) -> str:
         """HTML前処理（トークン削減）
 
         Args:
@@ -150,8 +150,23 @@ class LLMValidator:
             text = re.sub(r'\n+', '\n', text)
             text = re.sub(r' +', ' ', text)
 
-            # 文字数制限
-            return text[:max_chars]
+            # 重複行の除去（完全一致のみ）
+            lines = text.split('\n')
+            seen_lines = set()
+            unique_lines = []
+            for line in lines:
+                if line and line not in seen_lines:
+                    unique_lines.append(line)
+                    seen_lines.add(line)
+            text = '\n'.join(unique_lines)
+
+            # 文字数制限（スマート切り詰め: 前半70% + 後半30%）
+            if len(text) > max_chars:
+                front_chars = int(max_chars * 0.7)
+                back_chars = max_chars - front_chars
+                text = text[:front_chars] + '\n...(中間省略)...\n' + text[-back_chars:]
+
+            return text
 
         except Exception as e:
             self.logger.warning(f"HTML preprocessing failed: {e}")
@@ -163,7 +178,7 @@ class LLMValidator:
         hints = self._build_prompt_hints(item)
         hints_text = '\n'.join(f"- {hint}" for hint in hints) if hints else "- 特別な追加要件はありません。"
 
-        return f"""あなたは企業IRサイト評価の専門家です。投資家向け情報（IR）ページの品質を評価し、観点どおりの根拠がない場合は必ず FAIL (found: false) を返します。架空の情報は絶対に作らないでください。
+        return f"""あなたは企業IRサイト評価の専門家です。投資家向け情報（IR）ページの品質を評価します。
 
 ## 評価項目
 「{item.item_name}」
@@ -177,16 +192,40 @@ class LLMValidator:
 ## 追加要件
 {hints_text}
 
-## 重要な注意
-- details には証拠となる具体的な文言（セクション名やフレーズなど）を 60 文字以内で含めてください。
-- 証拠が本文や構造情報に見つからない場合は FAIL とし、「未掲載」「見つからない」など理由を明記します。
-- JSON 以外の文字列は返さないでください。
+## 判定ルール
+
+### PASS条件（found: true）
+- 本文テキストまたは構造情報（メニュー、リンク、見出し等）に、判定基準を満たす**明確な証拠**がある
+- 証拠は具体的な文言、セクション名、リンクテキスト、または構造要素として確認できる
+- 推測や解釈ではなく、**実際に記載されている内容**に基づいて判断する
+
+### FAIL条件（found: false）
+- 本文や構造情報に証拠が見つからない、または不十分
+- 判定基準の一部のみを満たす（全体要件を満たさない）
+- 関連情報はあるが、判定基準が求める具体性に欠ける
+
+### 信頼度スコア（confidence）の設定基準
+- **0.9-1.0**: 判定基準を満たす証拠が複数箇所に明確に記載されている
+- **0.7-0.9**: 証拠は1箇所だが明確、または複数箇所だが解釈の余地がある
+- **0.5-0.7**: 証拠が間接的、または部分的にのみ基準を満たす
+- **0.3-0.5**: 関連情報はあるが証拠として不十分（通常FAIL）
+- **0.0-0.3**: 証拠がほぼ存在しない（明確なFAIL）
+
+## 重要な注意事項
+1. **架空の情報は絶対に作らない**：本文や構造情報に記載されていない内容を推測で補完しない
+2. **構造情報の活用**：メニュー、ナビゲーション、見出し、リンク等の構造要素も重要な証拠として使用する
+3. **具体的な証拠の記載**：details には以下を120文字以内で記載
+   - PASS時：証拠となる具体的な文言やセクション名（例：「決算短信」「統合報告書」等のリンクあり）
+   - FAIL時：何が不足しているか（例：「IR資料リンクなし」「該当セクション未確認」）
+4. **厳密な判定**：曖昧な場合は証拠不足としてFAILにする
 
 ## 出力形式
+JSON形式のみを返してください。他の文字列は一切含めないでください。
+
 {{
   "found": true/false,
   "confidence": 0.0-1.0,
-  "details": "観点に沿った根拠（60文字以内）"
+  "details": "証拠または理由を120文字以内で記載"
 }}
 
 判定を開始してください。"""

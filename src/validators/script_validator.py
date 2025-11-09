@@ -9,6 +9,13 @@ from urllib.parse import urljoin, urlparse
 from typing import Optional, List
 
 from playwright.async_api import Page
+from sslyze import (
+    Scanner,
+    ServerScanRequest,
+    ServerNetworkLocation,
+    ScanCommand,
+)
+from sslyze.errors import ConnectionToServerFailed
 
 from src.models import Site, ValidationItem, ValidationResult
 from src.utils.visual_checks import VisualAnalyzer
@@ -967,18 +974,8 @@ class ScriptValidator:
             carousels = VisualAnalyzer.evaluate_carousels(snapshot.get('carousels', []))
 
             if not carousels:
-                return ValidationResult(
-                    site_id=site.site_id,
-                    company_name=site.company_name,
-                    url=site.url,
-                    item_id=item.item_id,
-                    item_name=item.item_name,
-                    category=item.category,
-                    subcategory=item.subcategory,
-                    result='PASS',
-                    confidence=0.6,
-                    details='カルーセル未検出（基準達成）',
-                    checked_at=datetime.now()
+                return self._create_pass_result(
+                    site, item, 0.6, 'カルーセル未検出（基準達成）'
                 )
 
             over_limit = [c for c in carousels if c.slide_count > 3]
@@ -988,8 +985,9 @@ class ScriptValidator:
                 )
                 if len(over_limit) > 2:
                     summary += f"...+{len(over_limit) - 2}件"
-                details = f'カルーセル枚数超過 {summary}'
-                result = 'FAIL'
+                return self._create_fail_result(
+                    site, item, 0.5, f'カルーセル枚数超過 {summary}'
+                )
             else:
                 max_count = max(c.slide_count for c in carousels)
                 reference_selector = next(
@@ -997,21 +995,7 @@ class ScriptValidator:
                     ''
                 )
                 details = f'カルーセル枚数上限{max_count}枚（{reference_selector or "要素"}） / 動画長は自動計測未対応'
-                result = 'PASS'
-
-            return ValidationResult(
-                site_id=site.site_id,
-                company_name=site.company_name,
-                url=site.url,
-                item_id=item.item_id,
-                item_name=item.item_name,
-                category=item.category,
-                subcategory=item.subcategory,
-                result=result,
-                confidence=0.55 if result == 'PASS' else 0.5,
-                details=details,
-                checked_at=datetime.now()
-            )
+                return self._create_pass_result(site, item, 0.55, details)
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
@@ -1022,18 +1006,8 @@ class ScriptValidator:
             carousels = VisualAnalyzer.evaluate_carousels(snapshot.get('carousels', []))
 
             if not carousels:
-                return ValidationResult(
-                    site_id=site.site_id,
-                    company_name=site.company_name,
-                    url=site.url,
-                    item_id=item.item_id,
-                    item_name=item.item_name,
-                    category=item.category,
-                    subcategory=item.subcategory,
-                    result='PASS',
-                    confidence=0.6,
-                    details='カルーセル未検出（基準達成）',
-                    checked_at=datetime.now()
+                return self._create_pass_result(
+                    site, item, 0.6, 'カルーセル未検出（基準達成）'
                 )
 
             violations = [
@@ -1046,25 +1020,11 @@ class ScriptValidator:
                 )
                 if len(violations) > 2:
                     summary += f"...+{len(violations) - 2}件"
-                details = summary
-                result = 'FAIL'
+                return self._create_fail_result(site, item, 0.45, summary)
             else:
-                details = 'カルーセル停止ボタンを確認 / 自動再生での強制動作なし'
-                result = 'PASS'
-
-            return ValidationResult(
-                site_id=site.site_id,
-                company_name=site.company_name,
-                url=site.url,
-                item_id=item.item_id,
-                item_name=item.item_name,
-                category=item.category,
-                subcategory=item.subcategory,
-                result=result,
-                confidence=0.55 if result == 'PASS' else 0.45,
-                details=details,
-                checked_at=datetime.now()
-            )
+                return self._create_pass_result(
+                    site, item, 0.55, 'カルーセル停止ボタンを確認 / 自動再生での強制動作なし'
+                )
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
@@ -1079,18 +1039,8 @@ class ScriptValidator:
             ]
 
             if not hero_entries:
-                return ValidationResult(
-                    site_id=site.site_id,
-                    company_name=site.company_name,
-                    url=site.url,
-                    item_id=item.item_id,
-                    item_name=item.item_name,
-                    category=item.category,
-                    subcategory=item.subcategory,
-                    result='PASS',
-                    confidence=0.5,
-                    details='ファーストビュー領域を特定できず（基準超過なしと判断）',
-                    checked_at=datetime.now()
+                return self._create_pass_result(
+                    site, item, 0.5, 'ファーストビュー領域を特定できず（基準超過なしと判断）'
                 )
 
             viewport = page.viewport_size or {'height': VIEWPORT_HEIGHT_DEFAULT}
@@ -1114,18 +1064,9 @@ class ScriptValidator:
                 else f'ファーストビュー高さ {percent}%（{placeholder}）が画面の半分超'
             )
 
-            return ValidationResult(
-                site_id=site.site_id,
-                company_name=site.company_name,
-                url=site.url,
-                item_id=item.item_id,
-                item_name=item.item_name,
-                category=item.category,
-                subcategory=item.subcategory,
-                result='PASS' if is_valid else 'FAIL',
-                confidence=0.55 if is_valid else 0.45,
-                details=details,
-                checked_at=datetime.now()
+            confidence = 0.55 if is_valid else 0.45
+            return self._create_result(
+                site, item, 'PASS' if is_valid else 'FAIL', confidence, details
             )
         except Exception as e:
             return self._create_error_result(site, item, str(e))
@@ -4791,6 +4732,169 @@ class ScriptValidator:
             checked_url=checked_url
         )
 
+    def _create_result(
+        self,
+        site: Site,
+        item: ValidationItem,
+        result: str,
+        confidence: float,
+        details: str,
+        checked_url: str = None
+    ) -> ValidationResult:
+        """標準的なValidationResultを生成
+
+        Args:
+            site: サイト情報
+            item: 検証項目
+            result: 判定結果（'PASS', 'FAIL', 'ERROR', 'UNKNOWN'）
+            confidence: 信頼度（0.0-1.0）
+            details: 詳細メッセージ
+            checked_url: 検証したURL（オプション）
+
+        Returns:
+            ValidationResult: 検証結果オブジェクト
+        """
+        return ValidationResult(
+            site_id=site.site_id,
+            company_name=site.company_name,
+            url=site.url,
+            item_id=item.item_id,
+            item_name=item.item_name,
+            category=item.category,
+            subcategory=item.subcategory,
+            result=result,
+            confidence=confidence,
+            details=details,
+            checked_at=datetime.now(),
+            checked_url=checked_url
+        )
+
+    def _create_pass_result(
+        self,
+        site: Site,
+        item: ValidationItem,
+        confidence: float,
+        details: str,
+        checked_url: str = None
+    ) -> ValidationResult:
+        """PASS結果を生成
+
+        Args:
+            site: サイト情報
+            item: 検証項目
+            confidence: 信頼度（0.0-1.0）
+            details: 詳細メッセージ
+            checked_url: 検証したURL（オプション）
+
+        Returns:
+            ValidationResult: PASS結果
+        """
+        return self._create_result(site, item, 'PASS', confidence, details, checked_url)
+
+    def _create_fail_result(
+        self,
+        site: Site,
+        item: ValidationItem,
+        confidence: float,
+        details: str,
+        checked_url: str = None
+    ) -> ValidationResult:
+        """FAIL結果を生成
+
+        Args:
+            site: サイト情報
+            item: 検証項目
+            confidence: 信頼度（0.0-1.0）
+            details: 詳細メッセージ
+            checked_url: 検証したURL（オプション）
+
+        Returns:
+            ValidationResult: FAIL結果
+        """
+        return self._create_result(site, item, 'FAIL', confidence, details, checked_url)
+
+    async def _check_tls_support(self, url: str) -> dict:
+        """TLS対応状況を確認
+
+        Args:
+            url: 対象URL
+
+        Returns:
+            dict: TLS対応状況
+                {
+                    'tls1_3_supported': bool,
+                    'tls1_2_supported': bool,
+                    'tls1_1_supported': bool,
+                    'tls1_0_supported': bool,
+                    'error': str (エラー時のみ)
+                }
+        """
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            port = parsed.port or 443
+
+            if not hostname:
+                return {'error': 'Invalid hostname'}
+
+            # サーバー接続先を設定
+            server_location = ServerNetworkLocation(hostname=hostname, port=port)
+
+            # スキャン設定
+            scan_request = ServerScanRequest(
+                server_location=server_location,
+                scan_commands={
+                    ScanCommand.TLS_1_3_CIPHER_SUITES,
+                    ScanCommand.TLS_1_2_CIPHER_SUITES,
+                    ScanCommand.TLS_1_1_CIPHER_SUITES,
+                    ScanCommand.TLS_1_0_CIPHER_SUITES,
+                },
+            )
+
+            # スキャン実行
+            scanner = Scanner()
+            scanner.queue_scans([scan_request])
+
+            # 結果を収集
+            result = {}
+            for scan_result in scanner.get_results():
+                # TLS 1.3
+                tls_1_3_attempt = scan_result.scan_result.tls_1_3_cipher_suites
+                if tls_1_3_attempt.result:
+                    result['tls1_3_supported'] = len(tls_1_3_attempt.result.accepted_cipher_suites) > 0
+                else:
+                    result['tls1_3_supported'] = False
+
+                # TLS 1.2
+                tls_1_2_attempt = scan_result.scan_result.tls_1_2_cipher_suites
+                if tls_1_2_attempt.result:
+                    result['tls1_2_supported'] = len(tls_1_2_attempt.result.accepted_cipher_suites) > 0
+                else:
+                    result['tls1_2_supported'] = False
+
+                # TLS 1.1
+                tls_1_1_attempt = scan_result.scan_result.tls_1_1_cipher_suites
+                if tls_1_1_attempt.result:
+                    result['tls1_1_supported'] = len(tls_1_1_attempt.result.accepted_cipher_suites) > 0
+                else:
+                    result['tls1_1_supported'] = False
+
+                # TLS 1.0
+                tls_1_0_attempt = scan_result.scan_result.tls_1_0_cipher_suites
+                if tls_1_0_attempt.result:
+                    result['tls1_0_supported'] = len(tls_1_0_attempt.result.accepted_cipher_suites) > 0
+                else:
+                    result['tls1_0_supported'] = False
+
+            return result
+
+        except ConnectionToServerFailed as e:
+            self.logger.warning(f"TLS check failed for {url}: {e}")
+            return {'error': f'Connection failed: {str(e)}'}
+        except Exception as e:
+            self.logger.error(f"TLS check error for {url}: {e}")
+            return {'error': str(e)}
+
     # === 2025年版新規項目実装 ===
 
     async def check_item_45(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
@@ -4960,6 +5064,85 @@ class ScriptValidator:
             )
         except Exception as e:
             return self._create_error_result(site, item, str(e))
+
+    async def check_item_62(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """No.620: TLS1.3が有効である"""
+        try:
+            # TLS対応状況を確認
+            tls_info = await self._check_tls_support(site.url)
+
+            # エラーチェック
+            if 'error' in tls_info:
+                return self._create_error_result(
+                    site, item,
+                    f"TLS確認エラー: {tls_info['error']}",
+                    site.url
+                )
+
+            # TLS1.3サポート確認
+            tls1_3_supported = tls_info.get('tls1_3_supported', False)
+
+            if tls1_3_supported:
+                return self._create_pass_result(
+                    site, item,
+                    confidence=1.0,
+                    details='TLS1.3サポート確認',
+                    checked_url=site.url
+                )
+            else:
+                return self._create_fail_result(
+                    site, item,
+                    confidence=1.0,
+                    details='TLS1.3が有効ではありません',
+                    checked_url=site.url
+                )
+
+        except Exception as e:
+            return self._create_error_result(site, item, str(e), site.url)
+
+    async def check_item_63(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """No.630: TLS1.0とTLS1.1が無効である"""
+        try:
+            # TLS対応状況を確認
+            tls_info = await self._check_tls_support(site.url)
+
+            # エラーチェック
+            if 'error' in tls_info:
+                return self._create_error_result(
+                    site, item,
+                    f"TLS確認エラー: {tls_info['error']}",
+                    site.url
+                )
+
+            # TLS1.0/1.1サポート確認
+            tls1_0_supported = tls_info.get('tls1_0_supported', False)
+            tls1_1_supported = tls_info.get('tls1_1_supported', False)
+
+            # 両方無効ならPASS
+            if not tls1_0_supported and not tls1_1_supported:
+                return self._create_pass_result(
+                    site, item,
+                    confidence=1.0,
+                    details='TLS1.0/1.1は無効（安全）',
+                    checked_url=site.url
+                )
+            else:
+                # 有効なプロトコルをリストアップ
+                issues = []
+                if tls1_0_supported:
+                    issues.append('TLS1.0')
+                if tls1_1_supported:
+                    issues.append('TLS1.1')
+
+                return self._create_fail_result(
+                    site, item,
+                    confidence=1.0,
+                    details=f"脆弱なプロトコルが有効: {', '.join(issues)}",
+                    checked_url=site.url
+                )
+
+        except Exception as e:
+            return self._create_error_result(site, item, str(e), site.url)
 
     async def check_item_94_new(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
         """No.940: 業績予想（業績見通し）を掲載している"""
@@ -7172,1479 +7355,3 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
-
-    # ============================================================================
-    # HELPER METHOD FOR ERROR HANDLING
-    # ============================================================================
-
-    def _create_error_result(self, site: Site, item: ValidationItem, error_msg: str) -> ValidationResult:
-        """エラー結果を作成"""
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='ERROR',
-            confidence=0.0,
-            details=error_msg,
-            checked_at=datetime.now(),
-            error_message=error_msg
-        )
-
-
-
-async def _check_keyword_in_html(self, page: Page, keywords: list, context: str = 'body') -> bool:
-    """Check if any keyword exists in the page HTML"""
-    try:
-        if context == 'body':
-            text = await page.inner_text('body')
-        else:
-            text = await page.inner_text(context)
-        text_lower = text.lower()
-        return any(keyword.lower() in text_lower for keyword in keywords)
-    except:
-        return False
-
-
-async def _check_pdf_link_exists(self, page: Page, keywords: list) -> bool:
-    """Check if PDF link with keywords exists"""
-    try:
-        links = await page.locator('a[href*=".pdf"]').all()
-        for link in links:
-            href = await link.get_attribute('href') or ''
-            text = await link.inner_text() or ''
-            combined = (href + ' ' + text).lower()
-            if any(keyword.lower() in combined for keyword in keywords):
-                return True
-        return False
-    except:
-        return False
-
-
-# ============================================================================
-# VALIDATOR METHODS (56 items)
-# ============================================================================
-
-async def check_item_61(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 61: 推奨環境にGoogle ChromeとEdgeの記載がある（両方、最新バージョン）"""
-    try:
-        page_text = await page.inner_text('body')
-        page_lower = page_text.lower()
-
-        has_chrome = 'chrome' in page_lower or 'クローム' in page_text
-        has_edge = 'edge' in page_lower or 'エッジ' in page_text
-        has_latest = '最新' in page_text or 'latest' in page_lower
-
-        is_valid = has_chrome and has_edge and has_latest
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.8,
-            details='Chrome・Edge・最新バージョン記載検出' if is_valid else 'Chrome/Edge/最新バージョンの記載が不十分',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_69(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 69: XMLサイトマップが設置されている"""
-    try:
-        # Check for sitemap.xml in common locations
-        has_sitemap_link = await self._check_keyword_in_html(page, ['sitemap.xml', 'sitemap'])
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_sitemap_link else 'FAIL',
-            confidence=0.7,
-            details='XMLサイトマップへのリンク検出' if has_sitemap_link else 'XMLサイトマップリンク未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_70(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 70: XMLサイトマップ内の3xxエラーは10以下である"""
-    try:
-        # This requires actual sitemap crawling - placeholder implementation
-        has_sitemap = await self._check_keyword_in_html(page, ['sitemap.xml'])
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_sitemap else 'FAIL',
-            confidence=0.5,
-            details='XMLサイトマップ検出（リダイレクトエラー詳細検証は手動推奨）' if has_sitemap else 'XMLサイトマップ未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_73(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 73: Cookieポリシーがある"""
-    try:
-        keywords = ['cookie', 'クッキー', 'cookie policy', 'クッキーポリシー']
-        has_cookie_policy = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_cookie_policy else 'FAIL',
-            confidence=0.8,
-            details='Cookieポリシー検出' if has_cookie_policy else 'Cookieポリシー未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_74(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 74: Cookieコンセントがある"""
-    try:
-        # Check for cookie consent dialogs/banners
-        consent_selectors = [
-            '[class*="cookie"]',
-            '[id*="cookie"]',
-            '[class*="consent"]',
-            '[id*="consent"]'
-        ]
-
-        has_consent = False
-        for selector in consent_selectors:
-            count = await page.locator(selector).count()
-            if count > 0:
-                has_consent = True
-                break
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_consent else 'FAIL',
-            confidence=0.7,
-            details='Cookieコンセント要素検出' if has_consent else 'Cookieコンセント要素未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_87(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 87: 自己資本比率を掲載している（5期分以上）"""
-    try:
-        keywords = ['自己資本比率', 'equity ratio', '資本比率']
-        has_equity_ratio = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_equity_ratio else 'FAIL',
-            confidence=0.7,
-            details='自己資本比率記載検出' if has_equity_ratio else '自己資本比率未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_88(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 88: PBR（株価純資産倍率）を掲載している"""
-    try:
-        keywords = ['pbr', 'p/b', '株価純資産倍率', 'price to book']
-        has_pbr = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_pbr else 'FAIL',
-            confidence=0.8,
-            details='PBR記載検出' if has_pbr else 'PBR未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_97(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 97: 各セグメントの業績についてグラフ（または表）がある"""
-    try:
-        keywords = ['セグメント', 'segment', '事業別', 'by segment']
-        has_segment = await self._check_keyword_in_html(page, keywords)
-
-        # Check for charts/graphs
-        chart_elements = await page.locator('canvas, svg, img[src*="chart"], img[src*="graph"]').count()
-        has_chart = chart_elements > 0
-
-        is_valid = has_segment and has_chart
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.6,
-            details='セグメント業績グラフ検出' if is_valid else 'セグメント業績グラフ未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_99(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 99: 直近の決算短信を掲載している（PDF可）"""
-    try:
-        keywords = ['決算短信', 'tanshin', '短信', 'financial results']
-        has_tanshin_pdf = await self._check_pdf_link_exists(page, keywords)
-        has_tanshin_text = await self._check_keyword_in_html(page, keywords)
-
-        is_valid = has_tanshin_pdf or has_tanshin_text
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.8,
-            details='決算短信検出' if is_valid else '決算短信未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_108(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 108: ファクトシートやby the numbers方式のコンパクトな会社概要を掲載している"""
-    try:
-        keywords = ['fact sheet', 'factsheet', 'ファクトシート', 'by the numbers', 'key figures', '主要数値']
-        has_factsheet = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_factsheet else 'FAIL',
-            confidence=0.8,
-            details='ファクトシート検出' if has_factsheet else 'ファクトシート未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_110(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 110: IR資料は期間・種類別のマトリックス表示をしている"""
-    try:
-        # Check for table structures that might be matrix displays
-        table_count = await page.locator('table').count()
-        has_ir_keywords = await self._check_keyword_in_html(page, ['IR資料', 'IR library', '資料一覧', 'documents'])
-
-        is_valid = table_count > 0 and has_ir_keywords
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.6,
-            details='IR資料マトリックス表示検出' if is_valid else 'IR資料マトリックス表示未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_122(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 122: 株主総会の議決権行使結果（臨時報告書等）を掲載している（PDF可）"""
-    try:
-        keywords = ['議決権行使結果', '臨時報告書', 'voting results', '行使結果']
-        has_voting_results = await self._check_pdf_link_exists(page, keywords) or await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_voting_results else 'FAIL',
-            confidence=0.8,
-            details='議決権行使結果検出' if has_voting_results else '議決権行使結果未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_124(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 124: 株主総会の動画には質疑応答パートを含む"""
-    try:
-        keywords = ['質疑応答', 'Q&A', 'QA', 'Q＆A', 'question', 'answer']
-        has_qa = await self._check_keyword_in_html(page, keywords)
-
-        # Check for video elements
-        video_count = await page.locator('video, iframe[src*="youtube"], iframe[src*="vimeo"]').count()
-        has_video = video_count > 0
-
-        is_valid = has_qa and has_video
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.6,
-            details='株主総会動画（質疑応答含む）検出' if is_valid else '株主総会動画質疑応答未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_125(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 125: 株主総会の質疑応答の内容を掲載している（PDF可）"""
-    try:
-        keywords = ['質疑応答', '株主総会', 'Q&A', 'QA']
-        has_qa_pdf = await self._check_pdf_link_exists(page, keywords)
-        has_qa_text = await self._check_keyword_in_html(page, keywords)
-
-        is_valid = has_qa_pdf or has_qa_text
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.7,
-            details='株主総会質疑応答検出' if is_valid else '株主総会質疑応答未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_132(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 132: 株主還元に関する数値目標を記載している"""
-    try:
-        keywords = ['株主還元', '配当', 'dividend', '目標', 'target', 'payout ratio', '配当性向']
-        has_shareholder_return = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_shareholder_return else 'FAIL',
-            confidence=0.7,
-            details='株主還元数値目標検出' if has_shareholder_return else '株主還元数値目標未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_134(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 134: 配当性向の推移をHTMLで記載している（5期分以上）"""
-    try:
-        keywords = ['配当性向', 'payout ratio', '配当推移']
-        has_payout_ratio = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_payout_ratio else 'FAIL',
-            confidence=0.7,
-            details='配当性向推移検出' if has_payout_ratio else '配当性向推移未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_137(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 137: 株主優待情報を掲載している"""
-    try:
-        keywords = ['株主優待', 'shareholder benefit', '優待']
-        has_benefit = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_benefit else 'FAIL',
-            confidence=0.8,
-            details='株主優待情報検出' if has_benefit else '株主優待情報未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_142(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 142: 格付情報を掲載している"""
-    try:
-        keywords = ['格付', 'rating', 'credit rating', 'bond rating']
-        has_rating = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_rating else 'FAIL',
-            confidence=0.8,
-            details='格付情報検出' if has_rating else '格付情報未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_143(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 143: 格付の推移を掲載している"""
-    try:
-        keywords = ['格付', 'rating', '推移', 'history', 'transition']
-        page_text = await page.inner_text('body')
-
-        has_rating = any(kw in page_text.lower() for kw in ['格付', 'rating'])
-        has_history = any(kw in page_text for kw in ['推移', 'history', 'transition', '履歴'])
-
-        is_valid = has_rating and has_history
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.7,
-            details='格付推移検出' if is_valid else '格付推移未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_145(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 145: アナリスト・カバレッジを掲載している"""
-    try:
-        keywords = ['アナリスト', 'analyst', 'coverage', 'カバレッジ']
-        has_analyst = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_analyst else 'FAIL',
-            confidence=0.8,
-            details='アナリストカバレッジ検出' if has_analyst else 'アナリストカバレッジ未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_146(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 146: スポンサードリサーチによるレポートを掲載している"""
-    try:
-        keywords = ['スポンサードリサーチ', 'sponsored research', 'スポンサード']
-        has_sponsored = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_sponsored else 'FAIL',
-            confidence=0.8,
-            details='スポンサードリサーチ検出' if has_sponsored else 'スポンサードリサーチ未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_148(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 148: 従業員数を掲載している"""
-    try:
-        keywords = ['従業員', 'employee', '社員数', 'number of employees']
-        has_employee_count = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_employee_count else 'FAIL',
-            confidence=0.8,
-            details='従業員数記載検出' if has_employee_count else '従業員数記載未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_149(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 149: トップページから会社概要まで通常メニューで2クリックで到達できる"""
-    try:
-        keywords = ['会社概要', 'company', 'about', '企業情報']
-        has_company_info = await self._check_keyword_in_html(page, keywords)
-
-        # Check if company info links exist in navigation
-        nav_count = await page.locator('nav a, header a').count()
-        has_navigation = nav_count > 0
-
-        is_valid = has_company_info and has_navigation
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.6,
-            details='会社概要へのナビゲーション検出' if is_valid else '会社概要へのナビゲーション未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_152(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 152: 会社案内もしくは事業紹介の動画を掲載している"""
-    try:
-        # Check for video elements
-        video_count = await page.locator('video, iframe[src*="youtube"], iframe[src*="vimeo"]').count()
-
-        keywords = ['会社案内', '事業紹介', 'company introduction', 'business introduction']
-        has_intro = await self._check_keyword_in_html(page, keywords)
-
-        is_valid = video_count > 0 and has_intro
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.7,
-            details='会社案内動画検出' if is_valid else '会社案内動画未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_155(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 155: 経営理念・パーパスを掲載している"""
-    try:
-        keywords = ['経営理念', 'パーパス', 'purpose', 'mission', 'philosophy', '企業理念']
-        has_philosophy = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_philosophy else 'FAIL',
-            confidence=0.8,
-            details='経営理念・パーパス検出' if has_philosophy else '経営理念・パーパス未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_157(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 157: 会社組織図を掲載している"""
-    try:
-        keywords = ['組織図', 'organization', 'organizational chart', '組織体制']
-        has_org_chart = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_org_chart else 'FAIL',
-            confidence=0.8,
-            details='組織図検出' if has_org_chart else '組織図未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_158(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 158: グループ企業一覧に事業内容を記載している"""
-    try:
-        keywords = ['グループ企業', 'group company', 'subsidiaries', '子会社', '事業内容', 'business']
-        page_text = await page.inner_text('body')
-
-        has_group = any(kw in page_text for kw in ['グループ企業', 'グループ会社', 'group company', 'subsidiaries', '子会社'])
-        has_business = any(kw in page_text for kw in ['事業内容', 'business', '事業'])
-
-        is_valid = has_group and has_business
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.7,
-            details='グループ企業事業内容検出' if is_valid else 'グループ企業事業内容未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_159(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 159: グループ企業一覧に議決権所有割合を記載している"""
-    try:
-        keywords = ['議決権', 'voting rights', '所有割合', 'ownership', '持株比率']
-        has_voting_info = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_voting_info else 'FAIL',
-            confidence=0.7,
-            details='議決権所有割合検出' if has_voting_info else '議決権所有割合未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_161(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 161: 代表取締役の経歴を記載している"""
-    try:
-        keywords = ['代表取締役', '経歴', 'ceo', 'president', 'biography', 'profile']
-        has_ceo_bio = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_ceo_bio else 'FAIL',
-            confidence=0.7,
-            details='代表取締役経歴検出' if has_ceo_bio else '代表取締役経歴未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_162(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 162: 全取締役・監査役の経歴と写真を掲載している"""
-    try:
-        keywords = ['取締役', '監査役', 'director', 'auditor', '経歴']
-        has_board_info = await self._check_keyword_in_html(page, keywords)
-
-        # Check for images (photos)
-        img_count = await page.locator('img').count()
-        has_photos = img_count > 5  # Arbitrary threshold
-
-        is_valid = has_board_info and has_photos
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.6,
-            details='役員経歴・写真検出' if is_valid else '役員経歴・写真未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_164(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 164: 役員の生年月日（または年齢）を記載している"""
-    try:
-        keywords = ['生年月日', '年齢', 'age', 'born', 'date of birth']
-        has_age_info = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_age_info else 'FAIL',
-            confidence=0.7,
-            details='役員年齢情報検出' if has_age_info else '役員年齢情報未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_169(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 169: コーポレート・ガバナンスに関する報告書を掲載している（PDF可）"""
-    try:
-        keywords = ['コーポレートガバナンス', 'corporate governance', 'ガバナンス報告書']
-        has_cg_pdf = await self._check_pdf_link_exists(page, keywords)
-        has_cg_text = await self._check_keyword_in_html(page, keywords)
-
-        is_valid = has_cg_pdf or has_cg_text
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.8,
-            details='ガバナンス報告書検出' if is_valid else 'ガバナンス報告書未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_171(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 171: コーポレートガバナンスに関する記載は、見出し、余白、フォントといった見やすさに配慮したデザインとなっている"""
-    try:
-        keywords = ['コーポレートガバナンス', 'corporate governance']
-        has_cg = await self._check_keyword_in_html(page, keywords)
-
-        # Check for heading tags
-        heading_count = await page.locator('h1, h2, h3, h4').count()
-        has_structure = heading_count > 3
-
-        is_valid = has_cg and has_structure
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.6,
-            details='ガバナンス情報の構造化検出' if is_valid else 'ガバナンス情報の構造化未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_182(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 182: 「資本コストや株価を意識した経営の実現に向けた対応」について専用ページやセクションがある"""
-    try:
-        keywords = ['資本コスト', 'cost of capital', '株価', 'stock price', 'roe', 'roic']
-        has_capital_cost = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_capital_cost else 'FAIL',
-            confidence=0.7,
-            details='資本コスト意識経営情報検出' if has_capital_cost else '資本コスト意識経営情報未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_187(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 187: 社外取締役のメッセージもしくは社外取締役との対談を掲載している"""
-    try:
-        keywords = ['社外取締役', 'outside director', 'independent director', 'メッセージ', '対談', 'interview']
-        has_outside_director = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_outside_director else 'FAIL',
-            confidence=0.7,
-            details='社外取締役メッセージ検出' if has_outside_director else '社外取締役メッセージ未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_188(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 188: トップページのメニューにESG、サステナビリティ、CSR等を配置している"""
-    try:
-        # Check navigation areas
-        keywords = ['esg', 'サステナビリティ', 'sustainability', 'csr']
-        nav_text = await page.locator('nav, header').inner_text()
-        nav_lower = nav_text.lower()
-
-        has_esg = any(kw in nav_lower for kw in keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_esg else 'FAIL',
-            confidence=0.8,
-            details='メニューにESG/サステナビリティ検出' if has_esg else 'メニューにESG/サステナビリティ未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_190(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 190: ESG、サステナビリティ、CSR等の実績評価指標（KPI）とその進捗状況を掲載している"""
-    try:
-        keywords = ['kpi', '指標', 'indicator', '目標', 'target', '進捗']
-        page_text = await page.inner_text('body')
-        page_lower = page_text.lower()
-
-        has_esg = any(kw in page_lower for kw in ['esg', 'サステナビリティ', 'sustainability', 'csr'])
-        has_kpi = any(kw in page_lower for kw in ['kpi', '指標', 'indicator', '目標'])
-
-        is_valid = has_esg and has_kpi
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.7,
-            details='ESG KPI検出' if is_valid else 'ESG KPI未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_191(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 191: TCFDのガイドラインに沿った情報開示を掲載している"""
-    try:
-        keywords = ['tcfd', 'task force on climate', '気候変動']
-        has_tcfd = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_tcfd else 'FAIL',
-            confidence=0.8,
-            details='TCFD情報開示検出' if has_tcfd else 'TCFD情報開示未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_197(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 197: 男女間の賃金比を掲載している（3期分以上）"""
-    try:
-        keywords = ['男女間', '賃金', 'gender pay', 'wage gap', '男女別', '男女の賃金']
-        has_gender_pay = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_gender_pay else 'FAIL',
-            confidence=0.7,
-            details='男女間賃金比検出' if has_gender_pay else '男女間賃金比未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_205(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 205: What We Are / Overview / at a Glance 等のグローバルスタイルの会社概要を掲載している"""
-    try:
-        keywords = ['what we are', 'overview', 'at a glance', 'who we are', 'about us']
-        has_global_overview = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_global_overview else 'FAIL',
-            confidence=0.8,
-            details='グローバルスタイル会社概要検出' if has_global_overview else 'グローバルスタイル会社概要未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_206(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 206: Mission/Principle/Purposeを掲載している"""
-    try:
-        keywords = ['mission', 'principle', 'purpose', 'vision', 'values']
-        has_mission = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_mission else 'FAIL',
-            confidence=0.8,
-            details='Mission/Principle/Purpose検出' if has_mission else 'Mission/Principle/Purpose未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_207(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 207: 代表メッセージを掲載し、直近1年以内の更新日付を記載している"""
-    try:
-        keywords = ['message', 'ceo', 'president', '社長', '代表']
-        has_message = await self._check_keyword_in_html(page, keywords)
-
-        # Check for recent dates (2024, 2025)
-        page_text = await page.inner_text('body')
-        has_recent_date = '2024' in page_text or '2025' in page_text
-
-        is_valid = has_message and has_recent_date
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.6,
-            details='代表メッセージ（更新日付含む）検出' if is_valid else '代表メッセージ（更新日付含む）未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_208(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 208: Strategy を掲載している"""
-    try:
-        keywords = ['strategy', 'strategic', '戦略', '経営戦略']
-        has_strategy = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_strategy else 'FAIL',
-            confidence=0.8,
-            details='Strategy検出' if has_strategy else 'Strategy未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_209(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 209: 全取締役・監査役のSkills Matrixを掲載している"""
-    try:
-        keywords = ['skills matrix', 'skill matrix', 'スキルマトリックス', 'スキル・マトリックス']
-        has_skills_matrix = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_skills_matrix else 'FAIL',
-            confidence=0.8,
-            details='Skills Matrix検出' if has_skills_matrix else 'Skills Matrix未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_210(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 210: Sustainabilityを掲載している"""
-    try:
-        keywords = ['sustainability', 'サステナビリティ', 'sustainable']
-        has_sustainability = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_sustainability else 'FAIL',
-            confidence=0.8,
-            details='Sustainability検出' if has_sustainability else 'Sustainability未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_211(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 211: TCFDガイドラインに沿った情報を掲載している"""
-    try:
-        keywords = ['tcfd', 'task force on climate', '気候変動']
-        has_tcfd = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_tcfd else 'FAIL',
-            confidence=0.8,
-            details='TCFD情報検出' if has_tcfd else 'TCFD情報未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_212(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 212: Key Figuresなど業績のデータ集約ページがある"""
-    try:
-        keywords = ['key figures', 'financial highlights', 'data', 'at a glance', '業績ハイライト']
-        has_key_figures = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_key_figures else 'FAIL',
-            confidence=0.7,
-            details='Key Figures検出' if has_key_figures else 'Key Figures未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_213(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 213: 主要株主一覧を掲載している"""
-    try:
-        keywords = ['主要株主', 'major shareholders', 'principal shareholders', '大株主']
-        has_shareholders = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_shareholders else 'FAIL',
-            confidence=0.8,
-            details='主要株主一覧検出' if has_shareholders else '主要株主一覧未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_215(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 215: Financial Results（Quarterly）を掲載している（PDF可）"""
-    try:
-        keywords = ['financial results', 'quarterly', 'earnings', '決算']
-        has_results_pdf = await self._check_pdf_link_exists(page, keywords)
-        has_results_text = await self._check_keyword_in_html(page, keywords)
-
-        is_valid = has_results_pdf or has_results_text
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.8,
-            details='Financial Results検出' if is_valid else 'Financial Results未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_216(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 216: Integrated Report /Annual Reportを掲載している（PDF可）"""
-    try:
-        keywords = ['integrated report', 'annual report', '統合報告書', 'アニュアルレポート']
-        has_report_pdf = await self._check_pdf_link_exists(page, keywords)
-        has_report_text = await self._check_keyword_in_html(page, keywords)
-
-        is_valid = has_report_pdf or has_report_text
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.8,
-            details='Integrated/Annual Report検出' if is_valid else 'Integrated/Annual Report未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_217(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 217: Presentationsを掲載している（PDF可）"""
-    try:
-        keywords = ['presentation', 'プレゼンテーション', '説明資料']
-        has_presentation_pdf = await self._check_pdf_link_exists(page, keywords)
-        has_presentation_text = await self._check_keyword_in_html(page, keywords)
-
-        is_valid = has_presentation_pdf or has_presentation_text
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.8,
-            details='Presentations検出' if is_valid else 'Presentations未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_225(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 225: 経営者インタビュー・メッセージの動画を掲載している"""
-    try:
-        # Check for video elements
-        video_count = await page.locator('video, iframe[src*="youtube"], iframe[src*="vimeo"]').count()
-
-        keywords = ['経営者', 'インタビュー', 'メッセージ', 'ceo', 'president', 'message']
-        has_message = await self._check_keyword_in_html(page, keywords)
-
-        is_valid = video_count > 0 and has_message
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.7,
-            details='経営者メッセージ動画検出' if is_valid else '経営者メッセージ動画未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_226(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 226: 動画ライブラリーを設置している"""
-    try:
-        keywords = ['動画ライブラリ', 'video library', 'ビデオライブラリ', '動画一覧']
-        has_video_library = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_video_library else 'FAIL',
-            confidence=0.8,
-            details='動画ライブラリ検出' if has_video_library else '動画ライブラリ未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_227(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 227: Youtubeに開設する公式アカウントをIRトップで紹介している"""
-    try:
-        # Check for YouTube links
-        youtube_links = await page.locator('a[href*="youtube.com"]').count()
-        has_youtube = youtube_links > 0
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_youtube else 'FAIL',
-            confidence=0.8,
-            details='YouTubeリンク検出' if has_youtube else 'YouTubeリンク未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_239(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 239: ウェブサイトに対する意見・要望を送信できる機能がある"""
-    try:
-        keywords = ['お問い合わせ', 'contact', 'feedback', 'ご意見', 'フィードバック']
-        has_contact = await self._check_keyword_in_html(page, keywords)
-
-        # Check for form elements
-        form_count = await page.locator('form').count()
-        has_form = form_count > 0
-
-        is_valid = has_contact or has_form
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if is_valid else 'FAIL',
-            confidence=0.7,
-            details='問い合わせ機能検出' if is_valid else '問い合わせ機能未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-async def check_item_240(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-    """Item 240: IRサイトアンケートを掲載している"""
-    try:
-        keywords = ['アンケート', 'survey', 'questionnaire', 'ご意見', 'フィードバック']
-        has_survey = await self._check_keyword_in_html(page, keywords)
-
-        return ValidationResult(
-            site_id=site.site_id,
-            company_name=site.company_name,
-            url=site.url,
-            item_id=item.item_id,
-            item_name=item.item_name,
-            category=item.category,
-            subcategory=item.subcategory,
-            result='PASS' if has_survey else 'FAIL',
-            confidence=0.7,
-            details='アンケート検出' if has_survey else 'アンケート未検出',
-            checked_at=datetime.now()
-        )
-    except Exception as e:
-        return self._create_error_result(site, item, str(e))
-
-
-# ============================================================================
-# HELPER METHOD FOR ERROR HANDLING
-# ============================================================================
-
-def _create_error_result(self, site: Site, item: ValidationItem, error_msg: str) -> ValidationResult:
-    """エラー結果を作成"""
-    return ValidationResult(
-        site_id=site.site_id,
-        company_name=site.company_name,
-        url=site.url,
-        item_id=item.item_id,
-        item_name=item.item_name,
-        category=item.category,
-        subcategory=item.subcategory,
-        result='ERROR',
-        confidence=0.0,
-        details=error_msg,
-        checked_at=datetime.now(),
-        error_message=error_msg
-    )

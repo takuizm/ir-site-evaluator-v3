@@ -30,3 +30,6 @@ axe-selenium-python==2.1.6
 
 # 日付処理
 python-dateutil==2.8.2
+
+# TLS/SSL検証
+sslyze>=6.0.0
