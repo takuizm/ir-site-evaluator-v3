@@ -6,6 +6,7 @@ playwright>=1.41.0
 # LLM API
 anthropic>=0.40.0
 openai==1.54.0
+httpx==0.27.2  # openai 1.54.0 は 0.28 系の proxies 引数非対応につき固定
 
 # データ処理
 pandas>=2.2.0

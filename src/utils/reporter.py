@@ -15,7 +15,7 @@ class Reporter:
     ValidationResultのリストからCSV/Excelレポートを生成する。
     """
 
-    def __init__(self, config, logger):
+    def __init__(self, config, logger, item_lookup=None, criteria_metadata=None, criteria_columns=None):
         """初期化
 
         Args:
@@ -24,6 +24,9 @@ class Reporter:
         """
         self.config = config
         self.logger = logger
+        self.item_lookup = item_lookup or {}
+        self.criteria_metadata = criteria_metadata or {}
+        self.criteria_columns = criteria_columns or []
 
     def generate_summary_csv(self, results: List[ValidationResult]):
         """サマリーCSVを生成する
@@ -40,10 +43,25 @@ class Reporter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # ValidationResultを辞書のリストに変換
-        data = [result.to_dict() for result in results]
+        data = []
+        for result in results:
+            row = result.to_dict()
+            criteria_id = self.item_lookup.get(row['item_id'])
+            meta = self.criteria_metadata.get(criteria_id)
+            if meta:
+                for col in self.criteria_columns:
+                    row[col] = meta.get(col, '')
+            data.append(row)
 
         # DataFrameに変換
         df = pd.DataFrame(data)
+
+        if self.item_lookup:
+            df.insert(
+                4,
+                'criteria_no',
+                df['item_id'].map(self.item_lookup).fillna('').astype(str)
+            )
 
         # CSVに出力
         df.to_csv(
@@ -69,25 +87,31 @@ class Reporter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # ValidationResultを辞書のリストに変換
-        data = [result.to_dict() for result in results]
+        data = []
+        for result in results:
+            row = result.to_dict()
+            criteria_id = self.item_lookup.get(row['item_id'])
+            meta = self.criteria_metadata.get(criteria_id)
+            if meta:
+                for col in self.criteria_columns:
+                    row[col] = meta.get(col, '')
+            data.append(row)
         df = pd.DataFrame(data)
 
-        # カテゴリ別集計
-        aggregated = df.groupby(['site_id', 'company_name', 'category']).agg({
-            'result': [
-                ('total_items', 'count'),
-                ('pass_count', lambda x: (x == 'PASS').sum()),
-                ('fail_count', lambda x: (x == 'FAIL').sum()),
-                ('unknown_count', lambda x: (x == 'UNKNOWN').sum()),
-                ('error_count', lambda x: (x == 'ERROR').sum())
-            ],
-            'confidence': [('avg_confidence', 'mean')]
-        }).reset_index()
+        # confidence列が欠けている場合は0.0で補完
+        if 'confidence' not in df.columns:
+            df['confidence'] = 0.0
 
-        # カラム名をフラット化
-        aggregated.columns = ['site_id', 'company_name', 'category', 'total_items',
-                              'pass_count', 'fail_count', 'unknown_count', 'error_count',
-                              'avg_confidence']
+        # カテゴリ別集計（Named Aggregation で列名を固定）
+        aggregated = df.groupby(['site_id', 'company_name', 'category']).agg(
+            total_items=('item_id', 'count'),
+            pass_count=('result', lambda x: (x == 'PASS').sum()),
+            fail_count=('result', lambda x: (x == 'FAIL').sum()),
+            unknown_count=('result', lambda x: (x == 'UNKNOWN').sum()),
+            error_count=('result', lambda x: (x == 'ERROR').sum()),
+            not_supported_count=('result', lambda x: (x == 'NOT_SUPPORTED').sum()),
+            avg_confidence=('confidence', 'mean')
+        ).reset_index()
 
         # PASS率を計算
         aggregated['pass_rate'] = aggregated['pass_count'] / aggregated['total_items']
@@ -118,6 +142,7 @@ class Reporter:
         fail_count = sum(1 for r in results if r.result == 'FAIL')
         unknown_count = sum(1 for r in results if r.result == 'UNKNOWN')
         error_count = sum(1 for r in results if r.result == 'ERROR')
+        not_supported_count = sum(1 for r in results if r.result == 'NOT_SUPPORTED')
 
         avg_confidence = sum(r.confidence for r in results) / total if total > 0 else 0.0
 
@@ -135,7 +160,8 @@ class Reporter:
             'fail_rate': fail_count / total if total > 0 else 0.0,
             'avg_confidence': avg_confidence,
             'unique_sites': unique_sites,
-            'unique_items': unique_items
+            'unique_items': unique_items,
+            'not_supported_count': not_supported_count,
         }
 
     def print_statistics(self, results: List[ValidationResult]):
@@ -161,6 +187,7 @@ class Reporter:
         self.logger.info(f"FAIL:    {stats['fail_count']:4,} ({stats['fail_rate']*100:5.1f}%)")
         self.logger.info(f"UNKNOWN: {stats['unknown_count']:4,} ({stats['unknown_count']/stats['total_checks']*100:5.1f}%)")
         self.logger.info(f"ERROR:   {stats['error_count']:4,} ({stats['error_count']/stats['total_checks']*100:5.1f}%)")
+        self.logger.info(f"NOT SUPPORTED: {stats['not_supported_count']:4,} ({stats['not_supported_count']/stats['total_checks']*100:5.1f}%)")
         self.logger.info("-" * 60)
         self.logger.info(f"Average Confidence: {stats['avg_confidence']:.2f}")
         self.logger.info("=" * 60)

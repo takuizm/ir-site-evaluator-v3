@@ -4,7 +4,9 @@ validation_items.csvのtarget_page列の値を、
 SiteMapのカテゴリにマッピングする。
 """
 
-from typing import Optional
+from typing import List, Optional
+import re
+
 from .site_mapper import SiteMap
 from ..models import ValidationItem
 
@@ -85,63 +87,71 @@ TARGET_PAGE_TO_CATEGORY = {
 }
 
 
-def get_target_url(item: ValidationItem, site_map: SiteMap) -> str:
-    """検証項目に必要なページURLを取得
+def _resolve_category(target_page_normalized: str) -> Optional[str]:
+    if not target_page_normalized:
+        return None
 
-    Args:
-        item: 検証項目
-        site_map: サイトマップ
-
-    Returns:
-        対象ページのURL（該当なしの場合はIRトップ）
-    """
-    # target_pageが空の場合はIRトップ
-    if not item.target_page or item.target_page.strip() == '':
-        return site_map.ir_top_url
-
-    # マッピング辞書から検索（完全一致）
-    target_page_normalized = item.target_page.strip()
     category = TARGET_PAGE_TO_CATEGORY.get(target_page_normalized)
-
     if category:
-        # カテゴリに対応するURLを取得
-        return site_map.get_best_url(category)
+        return category
 
-    # 完全一致がない場合、部分一致でフォールバック（柔軟性向上）
-    target_page_lower = target_page_normalized.lower()
+    lower = target_page_normalized.lower()
 
-    # 英語ページの部分一致（最優先）
-    if '英語' in target_page_normalized or 'english' in target_page_lower:
-        category = 'english_top'
-    # IR資料室・ライブラリの部分一致
-    elif 'ライブラリ' in target_page_normalized or '資料室' in target_page_normalized or 'library' in target_page_lower:
-        category = 'library'
-    # 決算短信・株主総会の部分一致
-    elif '決算短信' in target_page_normalized or '株主総会' in target_page_normalized:
-        category = 'library'
-    # 業績ハイライトの部分一致
-    elif '業績' in target_page_normalized or 'ハイライト' in target_page_normalized or 'financial' in target_page_lower:
-        category = 'financial'
-    # ガバナンスの部分一致
-    elif 'ガバナンス' in target_page_normalized or 'governance' in target_page_lower:
-        category = 'governance'
-    # 役員の部分一致
-    elif '役員' in target_page_normalized or '経営陣' in target_page_normalized or 'officers' in target_page_lower:
-        category = 'officers'
-    # 個人投資家向けの部分一致
-    elif '個人投資家' in target_page_normalized or '個人株主' in target_page_normalized:
-        category = 'individual'
-    # 株式情報の部分一致
-    elif '株式' in target_page_normalized or '株価' in target_page_normalized or 'stock' in target_page_lower:
-        category = 'stock'
-    # カレンダーの部分一致
-    elif 'カレンダー' in target_page_normalized or 'calendar' in target_page_lower:
-        category = 'calendar'
-    else:
-        # どれにも該当しない場合はIRトップ
-        return site_map.ir_top_url
+    if '英語' in target_page_normalized or 'english' in lower:
+        return 'english_top'
+    if any(keyword in target_page_normalized for keyword in ['ライブラリ', '資料室']) or 'library' in lower:
+        return 'library'
+    if any(keyword in target_page_normalized for keyword in ['決算短信', '株主総会']):
+        return 'library'
+    if any(keyword in target_page_normalized for keyword in ['業績', 'ハイライト']) or 'financial' in lower:
+        return 'financial'
+    if 'ガバナンス' in target_page_normalized or 'governance' in lower:
+        return 'governance'
+    if any(keyword in target_page_normalized for keyword in ['役員', '経営陣']) or 'officers' in lower:
+        return 'officers'
+    if any(keyword in target_page_normalized for keyword in ['個人投資家', '個人株主']):
+        return 'individual'
+    if any(keyword in target_page_normalized for keyword in ['株式', '株価']) or 'stock' in lower:
+        return 'stock'
+    if 'カレンダー' in target_page_normalized or 'calendar' in lower:
+        return 'calendar'
+    return None
 
-    return site_map.get_best_url(category)
+
+def _split_target_page(target_page: str) -> List[str]:
+    if not target_page:
+        return []
+    raw_parts = re.split(r'[、,\/]|\s+と\s+|\s+＆\s+|\s+and\s+', target_page)
+    return [part.strip() for part in raw_parts if part and part.strip()]
+
+
+def get_target_urls(item: ValidationItem, site_map: SiteMap) -> List[str]:
+    """target_pageに紐づくURL候補を複数返す"""
+    if not item.target_page or item.target_page.strip() == '':
+        return [site_map.ir_top_url]
+
+    parts = _split_target_page(item.target_page)
+    if not parts:
+        parts = [item.target_page.strip()]
+
+    urls = []
+    seen_categories = set()
+    for part in parts:
+        category = _resolve_category(part)
+        if category:
+            if category in seen_categories:
+                continue
+            seen_categories.add(category)
+            urls.append(site_map.get_best_url(category))
+        else:
+            urls.append(site_map.ir_top_url)
+
+    return urls or [site_map.ir_top_url]
+
+
+def get_target_url(item: ValidationItem, site_map: SiteMap) -> str:
+    """後方互換用: 最初のURLを返す"""
+    return get_target_urls(item, site_map)[0]
 
 
 def get_category_from_target_page(target_page: str) -> Optional[str]:

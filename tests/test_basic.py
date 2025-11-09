@@ -99,6 +99,48 @@ def test_data_models():
     print("✓ Data models behave as expected")
 
 
+def test_not_supported_reason():
+    """NOT_SUPPORTED理由の共通化が機能しているかを確認"""
+    print("\nTesting NOT_SUPPORTED reason registry...")
+
+    from src.models import ValidationItem
+    from src.utils.not_supported import get_not_supported_reason
+
+    perf_item = ValidationItem(
+        item_id=53,
+        category="ウェブサイトの使いやすさ",
+        subcategory="パフォーマンスと推奨環境",
+        item_name="IRトップページ：Action Duration（表示速度）は2.0秒以下",
+        automation_type="D",
+        check_type="llm",
+        priority="high",
+        difficulty=3,
+        instruction="Action Durationを測定する。",
+        target_page="IRトップ",
+        original_no=530
+    )
+    reason = get_not_supported_reason(perf_item)
+    assert reason is not None
+    assert "Action Duration" in reason
+
+    supported_item = ValidationItem(
+        item_id=1,
+        category="カテゴリ",
+        subcategory="サブカテゴリ",
+        item_name="通常観点",
+        automation_type="A",
+        check_type="script",
+        priority="low",
+        difficulty=1,
+        instruction="DOMで確認できる項目",
+        target_page="TOP",
+        original_no=10
+    )
+    assert get_not_supported_reason(supported_item) is None
+
+    print("✓ NOT_SUPPORTED reasons are consistent")
+
+
 def test_input_files():
     """入力CSVが存在し、必要なカラムを保持しているかを確認"""
     print("\nTesting input files...")
@@ -149,6 +191,7 @@ def main():
         ("Import Test", test_imports),
         ("Config Loading Test", test_config_loading),
         ("Data Models Test", test_data_models),
+        ("NOT_SUPPORTED Reason Test", test_not_supported_reason),
         ("Input Files Test", test_input_files),
     ]
 

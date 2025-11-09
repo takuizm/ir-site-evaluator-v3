@@ -6,7 +6,7 @@ import asyncio
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from typing import List
+from typing import List, Tuple, Optional
 
 from src.config import Config
 from src.models import Site, ValidationItem, ValidationResult
@@ -15,9 +15,12 @@ from src.utils.scraper import Scraper
 from src.utils.llm_client import LLMClient
 from src.utils.reporter import Reporter
 from src.utils.site_mapper import SiteMapper
-from src.utils.target_page_mapper import get_target_url
+from src.utils.target_page_mapper import get_target_urls
+from src.utils.structure_extractor import extract_structure
 from src.validators.script_validator import ScriptValidator
 from src.validators.llm_validator import LLMValidator
+from src.utils.criteria_loader import load_criteria_metadata
+from src.utils.not_supported import get_not_supported_reason
 
 
 class IRSiteEvaluator:
@@ -151,10 +154,34 @@ class IRSiteEvaluator:
         # Site Mapper
         self.site_mapper = SiteMapper()
 
-        # Reporter
-        self.reporter = Reporter(self.config.output, self.logger)
+        criteria_metadata, criteria_columns = load_criteria_metadata(Path('docs/criteria_org.csv'))
+        item_lookup = {item.item_id: getattr(item, 'original_no', None) for item in self.validation_items}
+        self.reporter = Reporter(
+            self.config.output,
+            self.logger,
+            item_lookup=item_lookup,
+            criteria_metadata=criteria_metadata,
+            criteria_columns=criteria_columns
+        )
 
         self.logger.info("All components initialized")
+
+    async def _collect_page_assets(self, page_cache: dict) -> Tuple[dict, dict]:
+        """HTMLおよび構造メタデータのキャッシュを生成"""
+        html_cache = {}
+        structure_cache = {}
+
+        for url, page in page_cache.items():
+            try:
+                html = await page.content()
+                html_cache[url] = html
+                structure_cache[url] = extract_structure(html)
+            except Exception as e:
+                self.logger.warning(f"  Failed to capture HTML for {url}: {e}")
+                html_cache[url] = ""
+                structure_cache[url] = None
+
+        return html_cache, structure_cache
 
     async def main_loop(self):
         """メインループ: 全サイト×全項目を検証（サブページ対応版）"""
@@ -173,8 +200,8 @@ class IRSiteEvaluator:
                 # Step 2: 必要なページURLを特定
                 required_urls = set([site.url])  # IRトップは必須
                 for item in self.validation_items:
-                    target_url = get_target_url(item, site_map)
-                    required_urls.add(target_url)
+                    target_urls = get_target_urls(item, site_map)
+                    required_urls.update(target_urls)
 
                 self.logger.info(f"  Required pages: {len(required_urls)} URLs")
 
@@ -191,12 +218,23 @@ class IRSiteEvaluator:
                             # ページ取得失敗時はIRトップをフォールバック
                             page_cache[url] = ir_top_page
 
+                # Step 3.5: HTML/構造キャッシュ
+                html_cache, structure_cache = await self._collect_page_assets(page_cache)
+
                 # Step 4: 各検証項目を適切なページで実行
                 for item_idx, item in enumerate(self.validation_items, 1):
-                    target_url = get_target_url(item, site_map)
-                    page = page_cache.get(target_url, ir_top_page)  # フォールバック
+                    target_urls = get_target_urls(item, site_map)
+                    payloads = self._build_page_payloads(
+                        site,
+                        item,
+                        target_urls,
+                        page_cache,
+                        html_cache,
+                        structure_cache,
+                        site.url
+                    )
 
-                    result = await self.validate_item(site, page, item, target_url)
+                    result = await self._evaluate_item_with_payloads(site, item, payloads)
                     self.results.append(result)
 
                     log_msg = f"  [{item_idx}/{len(self.validation_items)}] {item.item_name}: {result.result}"
@@ -248,8 +286,8 @@ class IRSiteEvaluator:
                 # Step 2: 必要なページURLを特定
                 required_urls = set([site.url])  # IRトップは必須
                 for item in self.validation_items:
-                    target_url = get_target_url(item, site_map)
-                    required_urls.add(target_url)
+                    target_urls = get_target_urls(item, site_map)
+                    required_urls.update(target_urls)
 
                 self.logger.info(f"  Required pages: {len(required_urls)} URLs")
 
@@ -266,21 +304,29 @@ class IRSiteEvaluator:
                             # ページ取得失敗時はIRトップをフォールバック
                             page_cache[url] = ir_top_page
 
-                # Step 3.5: HTML事前キャッシュ（並列実行の競合回避）
-                html_cache = {}
-                for url, page in page_cache.items():
-                    try:
-                        html_cache[url] = await page.content()
-                    except Exception as e:
-                        self.logger.warning(f"  Failed to get HTML from {url}: {e}")
-                        html_cache[url] = ""
+                # Step 3.5: HTML/構造キャッシュ
+                html_cache, structure_cache = await self._collect_page_assets(page_cache)
 
                 # Step 4: 各検証項目を適切なページで実行
                 # 項目並列化が有効な場合は並列実行、無効な場合は直列実行
                 if self.config.processing.enable_item_parallel:
-                    site_results = await self._validate_items_parallel(site, page_cache, html_cache, site_map, ir_top_page)
+                    site_results = await self._validate_items_parallel(
+                        site,
+                        page_cache,
+                        html_cache,
+                        structure_cache,
+                        site_map,
+                        ir_top_page
+                    )
                 else:
-                    site_results = await self._validate_items_sequential(site, page_cache, html_cache, site_map, ir_top_page)
+                    site_results = await self._validate_items_sequential(
+                        site,
+                        page_cache,
+                        html_cache,
+                        structure_cache,
+                        site_map,
+                        ir_top_page
+                    )
 
                 # Step 5: 全ページをクローズ
                 for url, page in page_cache.items():
@@ -327,34 +373,8 @@ class IRSiteEvaluator:
                 if idx % self.config.processing.checkpoint_interval == 0:
                     self.save_checkpoint(idx)
 
-    async def validate_item(self, site: Site, page, item: ValidationItem, checked_url: str) -> ValidationResult:
-        """1つの検証項目を実行"""
-        try:
-            if item.check_type == 'script':
-                return await self.script_validator.validate(site, page, item, checked_url)
-            elif item.check_type == 'llm':
-                return await self.llm_validator.validate(site, page, item, checked_url)
-            else:
-                raise ValueError(f"Unknown check_type: {item.check_type}")
-        except Exception as e:
-            self.logger.error(f"Validation failed: {e}")
-            return ValidationResult(
-                site_id=site.site_id,
-                company_name=site.company_name,
-                url=site.url,
-                item_id=item.item_id,
-                item_name=item.item_name,
-                category=item.category,
-                subcategory=item.subcategory,
-                result='ERROR',
-                confidence=0.0,
-                details=str(e),
-                checked_at=datetime.now(),
-                checked_url=checked_url,
-                error_message=str(e)
-            )
 
-    async def _validate_items_sequential(self, site: Site, page_cache: dict, html_cache: dict, site_map: dict, ir_top_page) -> List[ValidationResult]:
+    async def _validate_items_sequential(self, site: Site, page_cache: dict, html_cache: dict, structure_cache: dict, site_map: dict, ir_top_page) -> List[ValidationResult]:
         """項目を直列実行する（後方互換性のため）
 
         Args:
@@ -369,10 +389,18 @@ class IRSiteEvaluator:
         """
         results = []
         for item_idx, item in enumerate(self.validation_items, 1):
-            target_url = get_target_url(item, site_map)
-            page = page_cache.get(target_url, ir_top_page)
+            target_urls = get_target_urls(item, site_map)
+            payloads = self._build_page_payloads(
+                site,
+                item,
+                target_urls,
+                page_cache,
+                html_cache,
+                structure_cache,
+                site.url
+            )
 
-            result = await self.validate_item(site, page, item, target_url)
+            result = await self._evaluate_item_with_payloads(site, item, payloads)
             results.append(result)
 
             log_msg = f"  [{item_idx}/{len(self.validation_items)}] {item.item_name}: {result.result}"
@@ -385,7 +413,7 @@ class IRSiteEvaluator:
 
         return results
 
-    async def _validate_items_parallel(self, site: Site, page_cache: dict, html_cache: dict, site_map: dict, ir_top_page) -> List[ValidationResult]:
+    async def _validate_items_parallel(self, site: Site, page_cache: dict, html_cache: dict, structure_cache: dict, site_map: dict, ir_top_page) -> List[ValidationResult]:
         """項目をバッチ並列実行する（LLM検証のみ）
 
         Args:
@@ -408,10 +436,17 @@ class IRSiteEvaluator:
 
         # Script検証: 直列実行（高速なのでそのまま）
         for item_idx, item in enumerate(script_items, 1):
-            target_url = get_target_url(item, site_map)
-            page = page_cache.get(target_url, ir_top_page)
+            payloads = self._build_page_payloads(
+                site,
+                item,
+                get_target_urls(item, site_map),
+                page_cache,
+                html_cache,
+                structure_cache,
+                site.url
+            )
 
-            result = await self.script_validator.validate(site, page, item, target_url)
+            result = await self._run_script_validations(site, item, payloads)
             all_results.append(result)
 
             log_msg = f"  [Script {item_idx}/{len(script_items)}] {item.item_name}: {result.result}"
@@ -432,41 +467,46 @@ class IRSiteEvaluator:
             # バッチ内の全項目を並列実行
             tasks = []
             for item in batch:
-                target_url = get_target_url(item, site_map)
-                html_content = html_cache.get(target_url, html_cache.get(site.url, ""))
+                payloads = self._build_page_payloads(
+                    site,
+                    item,
+                    get_target_urls(item, site_map),
+                    page_cache,
+                    html_cache,
+                    structure_cache,
+                    site.url
+                )
 
-                # validate_with_html()を使用
-                task = self.llm_validator.validate_with_html(site, html_content, item, target_url)
+                task = self.llm_validator.validate_with_pages(site, item, payloads)
                 tasks.append(task)
 
             # 並列実行
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
             # 結果を収集
-            for item, result in zip(batch, batch_results):
+            for batch_item, result in zip(batch, batch_results):
                 if isinstance(result, Exception):
-                    self.logger.error(f"  LLM validation failed for {item.item_name}: {result}")
-                    # エラー結果を作成
+                    self.logger.error(f"  LLM validation failed for {batch_item.item_name}: {result}")
                     result = ValidationResult(
                         site_id=site.site_id,
                         company_name=site.company_name,
                         url=site.url,
-                        item_id=item.item_id,
-                        item_name=item.item_name,
-                        category=item.category,
-                        subcategory=item.subcategory,
+                        item_id=batch_item.item_id,
+                        item_name=batch_item.item_name,
+                        category=batch_item.category,
+                        subcategory=batch_item.subcategory,
                         result='ERROR',
                         confidence=0.0,
                         details=str(result),
                         checked_at=datetime.now(),
-                        checked_url=get_target_url(item, site_map),
+                        checked_url=site.url,
                         error_message=str(result)
                     )
 
                 all_results.append(result)
 
                 # ログ出力
-                log_msg = f"  [{len(all_results)}/{len(self.validation_items)}] {item.item_name}: {result.result}"
+                log_msg = f"  [{len(all_results)}/{len(self.validation_items)}] {batch_item.item_name}: {result.result}"
                 if result.result == 'PASS':
                     self.logger.info(log_msg)
                 elif result.result == 'FAIL':
@@ -475,6 +515,116 @@ class IRSiteEvaluator:
                     self.logger.error(log_msg)
 
         return all_results
+
+    def _build_page_payloads(self, site: Site, item: ValidationItem, target_urls: List[str], page_cache: dict, html_cache: dict, structure_cache: dict, fallback_url: str) -> List[dict]:
+        fallback_page = page_cache.get(fallback_url)
+        fallback_html = html_cache.get(fallback_url, "")
+        fallback_structure = structure_cache.get(fallback_url)
+
+        payloads = []
+        seen = set()
+        for url in target_urls:
+            resolved = url or fallback_url
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            payloads.append({
+                'url': resolved,
+                'page': page_cache.get(resolved, fallback_page),
+                'html': html_cache.get(resolved, fallback_html),
+                'structure': structure_cache.get(resolved, fallback_structure)
+            })
+
+        if not payloads:
+            payloads.append({
+                'url': fallback_url,
+                'page': fallback_page,
+                'html': fallback_html,
+                'structure': fallback_structure
+            })
+
+        return payloads
+
+    async def _run_script_validations(self, site: Site, item: ValidationItem, payloads: List[dict]) -> ValidationResult:
+        last_result = None
+        for idx, payload in enumerate(payloads):
+            page = payload.get('page')
+            if not page:
+                continue
+            result = await self.script_validator.validate(site, page, item, payload['url'])
+            if result.result == 'PASS':
+                if idx > 0:
+                    result.details = f"別URL({payload['url']})でPASS: {result.details}"
+                return result
+            last_result = result
+
+        if last_result:
+            return last_result
+
+        # ここまで来るのはページ取得に失敗した場合のみ
+        return ValidationResult(
+            site_id=site.site_id,
+            company_name=site.company_name,
+            url=site.url,
+            item_id=item.item_id,
+            item_name=item.item_name,
+            category=item.category,
+            subcategory=item.subcategory,
+            result='ERROR',
+            confidence=0.0,
+            details='ページを取得できませんでした',
+            checked_at=datetime.now(),
+            checked_url=payloads[0]['url'] if payloads else site.url,
+            error_message='page unavailable'
+        )
+
+    def _create_not_supported_result(self, site: Site, item: ValidationItem, checked_url: str, reason: str) -> ValidationResult:
+        return ValidationResult(
+            site_id=site.site_id,
+            company_name=site.company_name,
+            url=site.url,
+            item_id=item.item_id,
+            item_name=item.item_name,
+            category=item.category,
+            subcategory=item.subcategory,
+            result='NOT_SUPPORTED',
+            confidence=0.0,
+            details=reason,
+            checked_at=datetime.now(),
+            checked_url=checked_url,
+            error_message=None
+        )
+
+    async def _evaluate_item_with_payloads(self, site: Site, item: ValidationItem, payloads: List[dict]) -> ValidationResult:
+        reason = get_not_supported_reason(item)
+        if reason:
+            checked_url = payloads[0]['url'] if payloads else site.url
+            return self._create_not_supported_result(site, item, checked_url, reason)
+
+        try:
+            if item.check_type == 'script':
+                return await self._run_script_validations(site, item, payloads)
+            elif item.check_type == 'llm':
+                return await self.llm_validator.validate_with_pages(site, item, payloads)
+            else:
+                raise ValueError(f"Unknown check_type: {item.check_type}")
+        except Exception as e:
+            self.logger.error(f"Validation failed: {e}")
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='ERROR',
+                confidence=0.0,
+                details=str(e),
+                checked_at=datetime.now(),
+                checked_url=payloads[0]['url'] if payloads else site.url,
+                error_message=str(e)
+            )
 
     def save_checkpoint(self, site_count: int):
         """チェックポイントを保存"""

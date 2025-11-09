@@ -77,7 +77,7 @@ class ValidationResult:
     item_name: str
     category: str
     subcategory: str
-    result: Literal['PASS', 'FAIL', 'UNKNOWN', 'ERROR']
+    result: Literal['PASS', 'FAIL', 'UNKNOWN', 'ERROR', 'NOT_SUPPORTED']
     confidence: float  # 0.0-1.0
     details: str
     checked_at: datetime
@@ -89,7 +89,7 @@ class ValidationResult:
         """初期化後のバリデーション"""
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError(f"Invalid confidence: {self.confidence}")
-        if self.result not in ['PASS', 'FAIL', 'UNKNOWN', 'ERROR']:
+        if self.result not in ['PASS', 'FAIL', 'UNKNOWN', 'ERROR', 'NOT_SUPPORTED']:
             raise ValueError(f"Invalid result: {self.result}")
 
     def to_dict(self) -> dict:

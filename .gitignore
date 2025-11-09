@@ -61,3 +61,8 @@ Thumbs.db
 # 開発用ドキュメント（納品不要）
 CLEANUP_PLAN.md
 TODO.md
+docs/llm_migration_plan.md
+docs/roadmap_delivery_2025-11.md
+
+# 中間生成物
+analysis/

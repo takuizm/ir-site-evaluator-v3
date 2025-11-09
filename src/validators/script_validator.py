@@ -2,9 +2,37 @@
 
 DOM構造・CSS・属性による機械的検証を行う。
 """
-from src.models import Site, ValidationItem, ValidationResult
+import re
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+from typing import Optional, List
+
 from playwright.async_api import Page
+
+from src.models import Site, ValidationItem, ValidationResult
+from src.utils.visual_checks import VisualAnalyzer
+
+HERO_SELECTORS = [
+    '.hero',
+    '.hero-area',
+    '.main-visual',
+    '.mainvisual',
+    '.mv',
+    '.fv',
+    '.first-view',
+    '#hero',
+    '#fv',
+]
+VIEWPORT_HEIGHT_DEFAULT = 1080
+VISUAL_EVENT_KEYWORDS = ['決算', '説明会', 'カンファレンス', 'IR', 'イベント', '予定', 'schedule', 'event']
+DATE_PATTERNS = [
+    re.compile(r'\d{1,2}月\d{1,2}日'),
+    re.compile(r'\d{4}/\d{1,2}/\d{1,2}'),
+    re.compile(r'\d{1,2}/\d{1,2}'),
+    re.compile(r'20\d{2}\s*(?:年)?\s*[QＱ][1-4]'),
+]
+CSS_LENGTH_PX = re.compile(r'^([0-9.]+)px$')
 
 
 class ScriptValidator:
@@ -13,7 +41,7 @@ class ScriptValidator:
     27項目のスクリプトベース検証を実行する。
     """
 
-    def __init__(self, scraper, logger):
+    def __init__(self, scraper, logger, visual_analyzer: Optional[VisualAnalyzer] = None):
         """初期化
 
         Args:
@@ -22,6 +50,7 @@ class ScriptValidator:
         """
         self.scraper = scraper
         self.logger = logger
+        self.visual_analyzer = visual_analyzer or VisualAnalyzer()
 
         # 検証メソッドマッピング（item_id -> メソッド）
         # 検証メソッドマッピング（item_id -> メソッド）
@@ -84,6 +113,125 @@ class ScriptValidator:
             246: self.check_item_246,
             247: self.check_item_247,
         }
+
+        self._register_additional_validators()
+
+    def _register_additional_validators(self):
+        manual_map = {
+            1: self.check_menu_count,
+            3: self.check_breadcrumb,
+            4: self.check_back_to_top_link,
+            5: self.check_no_scroll_areas,
+            9: self.check_carousel_pause_button,
+            11: self.check_font_size_not_too_small,
+            12: self.check_font_size_large_enough,
+            14: self.check_contrast,
+            15: self.check_visited_link_color,
+            16: self.check_link_underline,
+            17: self.check_link_text_not_ambiguous,
+            18: self.check_external_link_icon,
+            22: self.check_tls_version,
+            23: self.check_cookie_policy,
+            24: self.check_cookie_consent,
+            25: self.check_cookie_settings,
+            26: self.check_pdf_new_window,
+            28: self.check_roe_data,
+            29: self.check_equity_ratio,
+            30: self.check_pbr_data,
+            33: self.check_business_report,
+            35: self.check_quarterly_data_download,
+            45: self.check_search_input_visible,
+            61: self.check_recommended_browsers,
+        }
+
+        for item_id, func in manual_map.items():
+            self.validators.setdefault(item_id, func)
+
+        for attr in dir(self):
+            if not attr.startswith('check_item_'):
+                continue
+            try:
+                item_id = int(attr.split('_')[-1])
+            except ValueError:
+                continue
+            self.validators.setdefault(item_id, getattr(self, attr))
+
+    async def _capture_visual(self, page: Page, selectors: Optional[List[str]] = None):
+        if not self.visual_analyzer:
+            return {}
+        return await self.visual_analyzer.capture(page, selectors)
+
+    async def _collect_texts(self, page: Page, selectors: List[str], max_samples: int = 3) -> List[str]:
+        texts: List[str] = []
+        for selector in selectors:
+            locator = page.locator(selector)
+            count = await locator.count()
+            for idx in range(min(count, max_samples - len(texts))):
+                try:
+                    snippet = await locator.nth(idx).inner_text()
+                except Exception:
+                    continue
+                snippet = (snippet or '').strip()
+                if snippet:
+                    texts.append(snippet)
+                if len(texts) >= max_samples:
+                    return texts
+        return texts
+
+    async def _save_element_screenshot(self, locator, item_id: int, label: str) -> Optional[str]:
+        try:
+            if not self.visual_analyzer:
+                return None
+            screenshot_dir = self.visual_analyzer.screenshot_dir / f'item_{item_id}'
+            screenshot_dir.mkdir(parents=True, exist_ok=True)
+            sanitized = re.sub(r'[^a-zA-Z0-9_-]+', '_', label) or 'element'
+            path = screenshot_dir / f'{sanitized[:40]}.png'
+            box = await locator.bounding_box()
+            if not box or box['width'] < 30 or box['height'] < 30:
+                return None
+            await locator.screenshot(path=str(path))
+            return str(path)
+        except Exception:
+            return None
+
+    def _parse_line_height_ratio(self, entry: dict) -> Optional[float]:
+        styles = entry.get('styles') or {}
+        font_size_value = styles.get('fontSize')
+        line_height_value = styles.get('lineHeight')
+
+        if not font_size_value or not line_height_value:
+            return None
+
+        match = CSS_LENGTH_PX.match(font_size_value.strip())
+        if not match:
+            return None
+        font_px = float(match.group(1))
+        if font_px == 0:
+            return None
+
+        line_value = line_height_value.strip().lower()
+        if line_value == 'normal':
+            return 1.2  # CSS仕様上の目安
+        px_match = CSS_LENGTH_PX.match(line_value)
+        if px_match:
+            line_px = float(px_match.group(1))
+            return line_px / font_px if font_px else None
+
+        if line_value.endswith('%'):
+            try:
+                percent = float(line_value.rstrip('%'))
+                return percent / 100
+            except ValueError:
+                return None
+
+        if line_value.endswith('em'):
+            try:
+                em = float(line_value.rstrip('em'))
+                return em
+            except ValueError:
+                return None
+
+        return None
 
     async def validate(self, site: Site, page: Page, item: ValidationItem, checked_url: str) -> ValidationResult:
         """検証を実行する
@@ -812,24 +960,292 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
-    async def check_site_search(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-        """サイト内検索チェック（item_id: 19）"""
+    async def check_item_19(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """カルーセル枚数チェック（item_id: 19）"""
         try:
-            search_selectors = [
-                'input[type="search"]',
-                'input[name*="search"]',
-                'input[name*="q"]',
-                'input[placeholder*="検索"]',
-                '.search-box input',
-                '#search-box input',
+            snapshot = await self._capture_visual(page)
+            carousels = VisualAnalyzer.evaluate_carousels(snapshot.get('carousels', []))
+
+            if not carousels:
+                return ValidationResult(
+                    site_id=site.site_id,
+                    company_name=site.company_name,
+                    url=site.url,
+                    item_id=item.item_id,
+                    item_name=item.item_name,
+                    category=item.category,
+                    subcategory=item.subcategory,
+                    result='PASS',
+                    confidence=0.6,
+                    details='カルーセル未検出（基準達成）',
+                    checked_at=datetime.now()
+                )
+
+            over_limit = [c for c in carousels if c.slide_count > 3]
+            if over_limit:
+                summary = ', '.join(
+                    f"{c.selector or 'carousel'}: {c.slide_count}枚" for c in over_limit[:2]
+                )
+                if len(over_limit) > 2:
+                    summary += f"...+{len(over_limit) - 2}件"
+                details = f'カルーセル枚数超過 {summary}'
+                result = 'FAIL'
+            else:
+                max_count = max(c.slide_count for c in carousels)
+                reference_selector = next(
+                    (c.selector for c in carousels if c.slide_count == max_count),
+                    ''
+                )
+                details = f'カルーセル枚数上限{max_count}枚（{reference_selector or "要素"}） / 動画長は自動計測未対応'
+                result = 'PASS'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result=result,
+                confidence=0.55 if result == 'PASS' else 0.5,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_20(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """カルーセル停止操作チェック（item_id: 20）"""
+        try:
+            snapshot = await self._capture_visual(page)
+            carousels = VisualAnalyzer.evaluate_carousels(snapshot.get('carousels', []))
+
+            if not carousels:
+                return ValidationResult(
+                    site_id=site.site_id,
+                    company_name=site.company_name,
+                    url=site.url,
+                    item_id=item.item_id,
+                    item_name=item.item_name,
+                    category=item.category,
+                    subcategory=item.subcategory,
+                    result='PASS',
+                    confidence=0.6,
+                    details='カルーセル未検出（基準達成）',
+                    checked_at=datetime.now()
+                )
+
+            violations = [
+                c for c in carousels if c.autoplay and not c.has_pause_control
             ]
 
-            found = False
-            for selector in search_selectors:
-                count = await page.locator(selector).count()
-                if count > 0:
-                    found = True
+            if violations:
+                summary = ', '.join(
+                    f"{c.selector or 'carousel'}: 停止ボタンなし" for c in violations[:2]
+                )
+                if len(violations) > 2:
+                    summary += f"...+{len(violations) - 2}件"
+                details = summary
+                result = 'FAIL'
+            else:
+                details = 'カルーセル停止ボタンを確認 / 自動再生での強制動作なし'
+                result = 'PASS'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result=result,
+                confidence=0.55 if result == 'PASS' else 0.45,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_21(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """ファーストビュー面積チェック（item_id: 21）"""
+        try:
+            snapshot = await self._capture_visual(page, HERO_SELECTORS)
+            styles = snapshot.get('styles', [])
+            hero_entries = [
+                entry for entry in styles
+                if entry.get('found') and (entry.get('rect') or {}).get('height', 0) > 0
+            ]
+
+            if not hero_entries:
+                return ValidationResult(
+                    site_id=site.site_id,
+                    company_name=site.company_name,
+                    url=site.url,
+                    item_id=item.item_id,
+                    item_name=item.item_name,
+                    category=item.category,
+                    subcategory=item.subcategory,
+                    result='PASS',
+                    confidence=0.5,
+                    details='ファーストビュー領域を特定できず（基準超過なしと判断）',
+                    checked_at=datetime.now()
+                )
+
+            viewport = page.viewport_size or {'height': VIEWPORT_HEIGHT_DEFAULT}
+            viewport_height = viewport.get('height') or VIEWPORT_HEIGHT_DEFAULT
+
+            ratios = []
+            for entry in hero_entries:
+                rect = entry.get('rect') or {}
+                height = rect.get('height') or 0
+                ratio = height / viewport_height if viewport_height else 0
+                ratios.append((entry.get('selector'), ratio))
+
+            max_selector, max_ratio = max(ratios, key=lambda item: item[1])
+            is_valid = max_ratio <= 0.5
+            percent = round(max_ratio * 100, 1)
+
+            placeholder = max_selector or "要素"
+            details = (
+                f'ファーストビュー高さ {percent}%（{placeholder}）'
+                if is_valid
+                else f'ファーストビュー高さ {percent}%（{placeholder}）が画面の半分超'
+            )
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.55 if is_valid else 0.45,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_22(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """ファーストビュー内イベント予定チェック（item_id: 22）"""
+        try:
+            texts = await self._collect_texts(page, HERO_SELECTORS, max_samples=5)
+            has_event = False
+            matched_snippet = ''
+            for snippet in texts:
+                lower = snippet.lower()
+                if not any(keyword.lower() in lower for keyword in VISUAL_EVENT_KEYWORDS):
+                    continue
+                if any(pattern.search(snippet) for pattern in DATE_PATTERNS):
+                    has_event = True
+                    matched_snippet = snippet.strip().replace('\n', ' ')[:80]
                     break
+
+            details = (
+                f'ファーストビュー内に予定記載あり（{matched_snippet}）'
+                if has_event else 'ファーストビュー内に予定・日付の併記を確認できず'
+            )
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if has_event else 'FAIL',
+                confidence=0.5 if has_event else 0.35,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_23(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """IRニュース一覧チェック（item_id: 23）"""
+        try:
+            news_section_selectors = [
+                'section:has-text("IRニュース")',
+                'section:has-text("IR News")',
+                '.ir-news',
+                '#ir-news',
+                '.news-list',
+                'section:has-text("ニュース")',
+            ]
+
+            has_news_list = False
+            detected_count = 0
+            for selector in news_section_selectors:
+                section = page.locator(selector)
+                count = await section.count()
+                if count == 0:
+                    continue
+                entries = section.first.locator('li, article, .news-item, .list-item')
+                detected_count = await entries.count()
+                if detected_count >= 3:
+                    has_news_list = True
+                    break
+
+            details = (
+                f'IRニュース一覧 {detected_count}件を検出'
+                if has_news_list else 'IRニュース一覧（3件以上）を検出できず'
+            )
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if has_news_list else 'FAIL',
+                confidence=0.55 if has_news_list else 0.35,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_25(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """トップの顔写真掲載チェック（item_id: 25）"""
+        try:
+            photo_selectors = [
+                'section:has-text("トップメッセージ") img',
+                'section:has-text("社長メッセージ") img',
+                '.top-message img',
+                '.ceo-message img',
+                '.president-message img',
+                'img[alt*="社長"]',
+                'img[alt*="CEO"]',
+                'img[alt*="代表"]',
+                'img[src*="ceo"]',
+            ]
+            screenshot_path = None
+            found = False
+            for selector in photo_selectors:
+                locator = page.locator(selector)
+                if await locator.count() == 0:
+                    continue
+                target = locator.first
+                box = await target.bounding_box()
+                if not box or box['width'] < 60 or box['height'] < 60:
+                    continue
+                screenshot_path = await self._save_element_screenshot(target, item.item_id, 'ceo_photo')
+                found = True
+                break
+
+            details = (
+                f'トップメッセージ画像を検出（{screenshot_path}）'
+                if (found and screenshot_path)
+                else 'トップメッセージ画像を検出' if found
+                else '代表者の顔写真を検出できず'
+            )
 
             return ValidationResult(
                 site_id=site.site_id,
@@ -840,15 +1256,282 @@ class ScriptValidator:
                 category=item.category,
                 subcategory=item.subcategory,
                 result='PASS' if found else 'FAIL',
-                confidence=0.8,
-                details='検索機能検出' if found else '検索機能未検出',
+                confidence=0.5 if found else 0.35,
+                details=details,
+                checked_at=datetime.now(),
+                screenshot_path=screenshot_path if found else None,
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_29(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """代替テキストの有無チェック（item_id: 29）"""
+        try:
+            stats = await page.evaluate(
+                """
+                () => {
+                    const imgs = Array.from(document.querySelectorAll('img'));
+                    let missing = 0;
+                    imgs.forEach((img) => {
+                        const alt = (img.getAttribute('alt') || '').trim();
+                        if (!alt) {
+                            missing += 1;
+                        }
+                    });
+                    return { total: imgs.length, missing };
+                }
+                """
+            )
+
+            total = stats.get('total') or 0
+            missing = stats.get('missing') or 0
+            if total == 0:
+                result = 'PASS'
+                details = '画像要素なし'
+            else:
+                ratio = (total - missing) / total
+                threshold = 0.95
+                result = 'PASS' if ratio >= threshold else 'FAIL'
+                details = f'画像{total}件中{total - missing}件でaltあり'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result=result,
+                confidence=0.55 if result == 'PASS' else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_30(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """色以外のリンク識別チェック（item_id: 30）"""
+        try:
+            stats = await page.evaluate(
+                """
+                () => {
+                    const anchors = Array.from(document.querySelectorAll('a'));
+                    let total = 0;
+                    let underlined = 0;
+                    anchors.forEach((anchor) => {
+                        const style = window.getComputedStyle(anchor);
+                        if (!style) return;
+                        total += 1;
+                        const textDecorationLine = style.textDecorationLine || style.textDecoration;
+                        const borderBottom = style.borderBottomStyle;
+                        if ((textDecorationLine && textDecorationLine.includes('underline')) ||
+                            (borderBottom && borderBottom !== 'none')) {
+                            underlined += 1;
+                        }
+                    });
+                    return { total, underlined };
+                }
+                """
+            )
+
+            total = stats.get('total') or 0
+            underlined = stats.get('underlined') or 0
+            if total == 0:
+                result = 'PASS'
+                details = 'ページ内にリンクを検出できず'
+            else:
+                ratio = underlined / total
+                threshold = 0.6
+                result = 'PASS' if ratio >= threshold else 'FAIL'
+                details = f'リンク{total}件中{underlined}件で下線/装飾あり'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result=result,
+                confidence=0.5 if result == 'PASS' else 0.35,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_33(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """コントラスト比チェック（item_id: 33）"""
+        try:
+            snapshot = await self._capture_visual(page, ['body', 'main', '.content', '.article'])
+            styles = snapshot.get('styles', [])
+            ratios = []
+            for entry in styles:
+                selector = entry.get('selector')
+                if selector not in ['body', 'main', '.content', '.article']:
+                    continue
+                ratio = (entry.get('styles') or {}).get('contrastRatio')
+                if ratio:
+                    ratios.append((selector, ratio))
+
+            if not ratios:
+                result = 'FAIL'
+                details = 'コントラスト比を計算できず'
+            else:
+                best_selector, best_ratio = max(ratios, key=lambda item: item[1])
+                result = 'PASS' if best_ratio >= 4.5 else 'FAIL'
+                details = f'{best_selector or "要素"} コントラスト {best_ratio}:1'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result=result,
+                confidence=0.55 if result == 'PASS' else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_37(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """行間チェック（item_id: 37）"""
+        try:
+            snapshot = await self._capture_visual(page, ['main', '.content', '.article', 'body'])
+            styles = snapshot.get('styles', [])
+            ratios = []
+            for entry in styles:
+                ratio = self._parse_line_height_ratio(entry)
+                if ratio:
+                    ratios.append((entry.get('selector'), ratio))
+
+            if not ratios:
+                result = 'FAIL'
+                details = '行間情報を取得できず'
+            else:
+                selector, best_ratio = max(ratios, key=lambda item: item[1])
+                result = 'PASS' if best_ratio >= 1.5 else 'FAIL'
+                details = f'{selector or "要素"} 行間比 {best_ratio:.2f}'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result=result,
+                confidence=0.55 if result == 'PASS' else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_38(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """訪問済みリンク識別チェック（item_id: 38）"""
+        try:
+            has_rule = await page.evaluate(
+                """
+                () => {
+                    const sheets = Array.from(document.styleSheets || []);
+                    for (const sheet of sheets) {
+                        let rules;
+                        try {
+                            rules = sheet.cssRules || [];
+                        } catch (e) {
+                            continue;
+                        }
+                        for (const rule of Array.from(rules)) {
+                            if (rule.selectorText && rule.selectorText.includes(':visited')) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+                """
+            )
+
+            details = '訪問済みリンク用のCSSを検出' if has_rule else ':visited 定義を検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if has_rule else 'FAIL',
+                confidence=0.45 if has_rule else 0.3,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_40(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """別ウィンドウリンク識別チェック（item_id: 40）"""
+        return await self.check_external_link_icon(site, page, item)
+
+    async def check_item_43(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """PDFリンク識別チェック（item_id: 43）"""
+        try:
+            stats = await page.evaluate(
+                """
+                () => {
+                    const links = Array.from(document.querySelectorAll('a[href*=".pdf"]'));
+                    let indicated = 0;
+                    links.forEach((link) => {
+                        const text = (link.textContent || '').toLowerCase();
+                        const title = (link.getAttribute('title') || '').toLowerCase();
+                        const hasText = text.includes('pdf') || title.includes('pdf');
+                        const hasIcon = !!link.querySelector('img[alt*="pdf" i], img[src*="pdf" i], svg');
+                        if (hasText || hasIcon) {
+                            indicated += 1;
+                        }
+                    });
+                    return { total: links.length, indicated };
+                }
+                """
+            )
+
+            total = stats.get('total') or 0
+            indicated = stats.get('indicated') or 0
+            if total == 0:
+                result = 'PASS'
+                details = 'PDFリンクなし'
+            else:
+                ratio = indicated / total
+                result = 'PASS' if ratio >= 0.8 else 'FAIL'
+                details = f'PDFリンク{total}件中{indicated}件でアイコン/文言あり'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result=result,
+                confidence=0.55 if result == 'PASS' else 0.4,
+                details=details,
                 checked_at=datetime.now()
             )
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
     async def check_search_input_visible(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-        """検索窓表示チェック（item_id: 20）"""
+        """検索窓表示チェック（item_id: 45）"""
         try:
             is_visible = await page.evaluate('''
                 () => {
@@ -881,7 +1564,7 @@ class ScriptValidator:
             return self._create_error_result(site, item, str(e))
 
     async def check_recommended_browsers(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
-        """推奨ブラウザ記載チェック（item_id: 21）"""
+        """推奨ブラウザ記載チェック（item_id: 61）"""
         try:
             page_text = await page.inner_text('body')
             has_chrome = 'Chrome' in page_text or 'chrome' in page_text
@@ -1021,6 +1704,213 @@ class ScriptValidator:
                 result='PASS' if found else 'FAIL',
                 confidence=0.7,
                 details='Cookie設定ボタン検出' if found else 'Cookie設定ボタン未検出',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_60(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """推奨環境掲載チェック（item_id: 60）"""
+        try:
+            body_text = await page.inner_text('body')
+            keywords = ['推奨環境', '推奨ブラウザ', '推奨OS', '推奨動作環境']
+            found = any(keyword in body_text for keyword in keywords)
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if found else 'FAIL',
+                confidence=0.6,
+                details='推奨環境記載あり' if found else '推奨環境の記載を検出できず',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_75(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """Cookie設定案内チェック（item_id: 75）"""
+        return await self.check_cookie_settings(site, page, item)
+
+    async def check_item_112(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """最新資料一括ダウンロードチェック（item_id: 112）"""
+        try:
+            zip_links = await page.locator('a[href$=".zip"], a[href*=".zip?"]').count()
+            details_text = '一括ダウンロード用ZIP検出' if zip_links > 0 else 'ZIP形式の一括ダウンロード未検出'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if zip_links > 0 else 'FAIL',
+                confidence=0.7,
+                details=details_text,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_232(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """ソーシャルシェアボタンチェック（item_id: 232）"""
+        try:
+            share_selectors = [
+                'a[href*="facebook.com/sharer"]',
+                'a[href*="twitter.com/intent"]',
+                'a[href*="x.com/intent"]',
+                'a[href*="linkedin.com/share"]',
+                'a[href*="line.me/R/msg"]',
+                'button[class*="share"]',
+                '[data-share]',
+            ]
+            count = 0
+            for selector in share_selectors:
+                count += await page.locator(selector).count()
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if count > 0 else 'FAIL',
+                confidence=0.7,
+                details='ソーシャルシェアボタン検出' if count > 0 else 'シェアボタン未検出',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_234(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """ニュースリリースのフリーワード検索チェック（item_id: 234）"""
+        try:
+            search_selectors = [
+                'section:has-text("ニュース") input[type="search"]',
+                'section:has-text("ニュースリリース") input[type="text"]',
+                'div:has-text("NEWS RELEASE") input[type="search"]',
+                'form[action*="news"] input[type="text"]',
+                'form[action*="release"] input[type="text"]',
+            ]
+
+            has_search = False
+            for selector in search_selectors:
+                if await page.locator(selector).count() > 0:
+                    has_search = True
+                    break
+
+            if not has_search:
+                fallback_selector = 'input[type="search"], input[name*="keyword" i], input[name*="search" i]'
+                inputs = await page.locator(fallback_selector).count()
+                news_keywords = ['ニュース', 'news', 'リリース', 'プレス']
+                body_text = await page.inner_text('body')
+                has_news_context = any(keyword in body_text for keyword in news_keywords)
+                has_search = inputs > 0 and has_news_context
+
+            details = 'ニュース検索フォームを検出' if has_search else 'ニュース検索フォームを検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if has_search else 'FAIL',
+                confidence=0.5 if has_search else 0.35,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_235(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """ニュースリリースのカテゴリフィルターチェック（item_id: 235）"""
+        try:
+            news_sections = page.locator(
+                'section:has-text("ニュース"), section:has-text("ニュースリリース"), div:has-text("NEWS RELEASE")'
+            )
+            section_count = await news_sections.count()
+            section_count = min(section_count, 5) if section_count else 0
+
+            category_keywords = ['ir', '決算', 'プレス', 'release', '財務', 'サステ', '投資家', 'csr']
+            has_filter = False
+
+            def _has_category(texts) -> bool:
+                for text in texts:
+                    lower = text.lower()
+                    if any(keyword in lower for keyword in category_keywords):
+                        return True
+                return False
+
+            for idx in range(section_count):
+                section = news_sections.nth(idx)
+                option_texts = await section.locator('select option').all_inner_texts()
+                if _has_category(option_texts):
+                    has_filter = True
+                    break
+
+                tab_texts = await section.locator('button, a').all_inner_texts()
+                category_hits = [text for text in tab_texts if _has_category([text])]
+                if len(category_hits) >= 2:
+                    has_filter = True
+                    break
+
+            if not has_filter:
+                data_filter_elements = await page.locator('[data-filter], [data-category]').count()
+                has_filter = data_filter_elements > 0
+
+            details = 'ニュースカテゴリ絞り込みUIを検出' if has_filter else 'カテゴリフィルターを検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if has_filter else 'FAIL',
+                confidence=0.5 if has_filter else 0.35,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_236(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """ニュースメール配信登録リンクチェック（item_id: 236）"""
+        try:
+            keywords = ['メール配信', 'メールマガジン', '配信登録', 'IRメール']
+            selector = 'a:has-text("メール"), a:has-text("配信"), button:has-text("メール"), button:has-text("配信")'
+            link_count = await page.locator(selector).count()
+
+            if link_count == 0:
+                body_text = await page.inner_text('body')
+                link_found = any(keyword in body_text for keyword in keywords)
+            else:
+                link_found = True
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if link_found else 'FAIL',
+                confidence=0.6,
+                details='メール配信登録導線あり' if link_found else 'メール配信登録導線を検出できず',
                 checked_at=datetime.now()
             )
         except Exception as e:
@@ -1507,6 +2397,188 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
+    async def check_item_44(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """サイト内検索導線（日本語・英語）チェック（item_id: 44）"""
+        try:
+            search_selectors = [
+                'header input[type="search"]',
+                'header form input[name*="search" i]',
+                'header input[placeholder*="検索"]',
+                'header input[placeholder*="Search" i]',
+                'header button:has-text("検索")',
+                'header button:has-text("Search")',
+                'nav input[type="search"]',
+                'nav button[aria-label*="検索"]',
+                'nav button[aria-label*="search" i]',
+            ]
+
+            has_global_search = False
+            has_japanese_label = False
+            has_english_label = False
+
+            for selector in search_selectors:
+                elements = await page.locator(selector).all()
+                if not elements:
+                    continue
+                has_global_search = True
+                for el in elements:
+                    placeholder = await el.get_attribute('placeholder') or ''
+                    aria_label = await el.get_attribute('aria-label') or ''
+                    text = ''
+                    try:
+                        text = await el.inner_text()
+                    except:
+                        pass
+                    combined = (placeholder + ' ' + aria_label + ' ' + text).lower()
+                    if '検索' in combined:
+                        has_japanese_label = True
+                    if 'search' in combined:
+                        has_english_label = True
+
+            if not has_global_search:
+                icon_selectors = [
+                    'header button[class*="search"]',
+                    'nav button[class*="search"]',
+                    'header a[class*="search"]',
+                ]
+                for selector in icon_selectors:
+                    count = await page.locator(selector).count()
+                    if count > 0:
+                        has_global_search = True
+                        break
+
+            if not has_japanese_label or not has_english_label:
+                body_text = await page.inner_text('body')
+                body_lower = body_text.lower()
+                if '検索' in body_text:
+                    has_japanese_label = True
+                if 'search' in body_lower:
+                    has_english_label = True
+
+            is_valid = has_global_search and has_japanese_label and has_english_label
+
+            details_parts = []
+            details_parts.append('グローバル検索導線あり' if has_global_search else 'グローバル検索導線なし')
+            details_parts.append('日本語対応あり' if has_japanese_label else '日本語対応不明')
+            details_parts.append('英語対応あり' if has_english_label else '英語対応不明')
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.55 if is_valid else 0.35,
+                details=' / '.join(details_parts),
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_47(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """カテゴリ絞り込みが可能なサイト内検索チェック（item_id: 47）"""
+        try:
+            category_keywords = [
+                'カテゴリ',
+                'category',
+                'ニュース',
+                'ir',
+                'csr',
+                '決算',
+                'プレス',
+                'press',
+                'investor',
+                'finance',
+                'library',
+                'report',
+            ]
+
+            has_category_filter = await page.evaluate(
+                """
+                (keywords) => {
+                    const lowerKeywords = keywords.map((kw) => kw.toLowerCase());
+                    const forms = Array.from(document.querySelectorAll('form'));
+                    for (const form of forms) {
+                        const inputs = Array.from(form.querySelectorAll('input'));
+                        const hasSearchInput = inputs.some((input) => {
+                            const type = (input.getAttribute('type') || '').toLowerCase();
+                            if (type === 'search') return true;
+                            const name = (input.getAttribute('name') || '').toLowerCase();
+                            const placeholder = (input.getAttribute('placeholder') || '').toLowerCase();
+                            return (
+                                name.includes('search') ||
+                                name.includes('keyword') ||
+                                placeholder.includes('検索') ||
+                                placeholder.includes('search')
+                            );
+                        });
+                        if (!hasSearchInput) {
+                            continue;
+                        }
+
+                        let matchCount = 0;
+                        const options = Array.from(form.querySelectorAll('select option'));
+                        for (const option of options) {
+                            const text = (option.textContent || '').trim().toLowerCase();
+                            if (lowerKeywords.some((kw) => text.includes(kw))) {
+                                matchCount += 1;
+                            }
+                            if (matchCount >= 2) {
+                                return true;
+                            }
+                        }
+
+                        const choices = Array.from(
+                            form.querySelectorAll('input[type="checkbox"], input[type="radio"]')
+                        );
+                        for (const choice of choices) {
+                            const label =
+                                choice.closest('label') ||
+                                form.querySelector(`label[for="${choice.id}"]`);
+                            const text =
+                                (label && label.textContent) ||
+                                choice.getAttribute('value') ||
+                                '';
+                            const textLower = text.trim().toLowerCase();
+                            if (lowerKeywords.some((kw) => textLower.includes(kw))) {
+                                matchCount += 1;
+                            }
+                            if (matchCount >= 2) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+                """,
+                category_keywords,
+            )
+
+            details = (
+                'カテゴリ選択付き検索フォームを検出'
+                if has_category_filter
+                else 'カテゴリ選択付き検索フォームを検出できず'
+            )
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if has_category_filter else 'FAIL',
+                confidence=0.55 if has_category_filter else 0.35,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
     async def check_item_49(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
         """No.630: Cookieを常設している"""
         try:
@@ -1529,6 +2601,42 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
+    async def check_item_51(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """検索結果のHTML/PDF絞り込みチェック（item_id: 51）"""
+        try:
+            option_texts = await page.locator('select option').all_inner_texts()
+            option_texts_lower = [text.lower() for text in option_texts]
+            has_option_filter = 'html' in option_texts_lower and 'pdf' in option_texts_lower
+
+            button_texts = await page.locator('button, label, a').all_inner_texts()
+            button_texts_lower = [text.lower() for text in button_texts[:200]]  # safety cap
+            html_token = any('html' in text for text in button_texts_lower)
+            pdf_token = any('pdf' in text for text in button_texts_lower)
+            has_button_filter = html_token and pdf_token
+
+            is_valid = has_option_filter or has_button_filter
+            details = (
+                'HTML/PDFフィルタを検出'
+                if is_valid
+                else 'HTML/PDFフィルタを検出できず'
+            )
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.5 if is_valid else 0.35,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
     async def check_item_50(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
         """No.640: IR資料は書類種別ごとにページが分かれている"""
         try:
@@ -1546,6 +2654,69 @@ class ScriptValidator:
                 result='PASS' if has_content else 'FAIL',
                 confidence=0.7,
                 details='検証完了' if has_content else '未検出',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_52(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """検索結果チューニング（統合報告書を最上位）チェック（item_id: 52）"""
+        try:
+            keyword = '統合報告書'
+            link_locator = page.locator(f'a:has-text("{keyword}")')
+            link_count = await link_locator.count()
+
+            top_hit = await page.evaluate(
+                """
+                (keyword) => {
+                    const containers = document.querySelectorAll(
+                        '.search-result, .searchResults, .result-list, .search-list, ul[class*="search"], ol[class*="search"]'
+                    );
+                    for (const container of containers) {
+                        const items = container.querySelectorAll('li, article, div');
+                        if (items.length === 0) continue;
+                        const first = items[0];
+                        const text = (first.textContent || '').toLowerCase();
+                        if (text.includes(keyword.toLowerCase())) {
+                            return true;
+                        }
+                        return false;
+                    }
+                    return false;
+                }
+                """,
+                keyword,
+            )
+
+            link_text = ''
+            if link_count > 0:
+                link_text = (await link_locator.first.inner_text()).strip()
+
+            has_year = bool(re.search(r'20\\d{2}', link_text))
+            has_latest = '最新' in link_text
+
+            is_valid = top_hit and (has_year or has_latest)
+
+            if not link_text:
+                details = '統合報告書の検索結果を検出できず'
+            elif is_valid:
+                details = f'検索トップに統合報告書（{link_text[:30]}）を検出'
+            elif top_hit:
+                details = '検索トップに統合報告書はあるが最新性を確認できず'
+            else:
+                details = '統合報告書が検索トップに表示されず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.45 if is_valid else 0.3,
+                details=details,
                 checked_at=datetime.now()
             )
         except Exception as e:
@@ -1595,6 +2766,123 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
+    async def check_item_78(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """売上・利益推移グラフ掲載チェック（item_id: 78）"""
+        try:
+            body_text = self._normalize_text(await page.inner_text('body'))
+            metrics = ['売上高', '経常利益', '営業利益', '当期純利益']
+            metric_hits = sum(1 for keyword in metrics if keyword in body_text)
+            has_period = any(token in body_text for token in ['5期', '５期', '5年', '五年', '5年度', '五年度', '5-year'])
+            has_chart = await self._has_chart_near_keywords(page, metrics)
+
+            is_valid = has_chart and metric_hits >= 3 and has_period
+            details = '売上・利益推移グラフを検出' if is_valid else '売上・利益推移グラフまたは期間情報を検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.55 if is_valid else 0.35,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_79(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """売上・利益推移グラフの説明併記チェック（item_id: 79）"""
+        try:
+            body_text = self._normalize_text(await page.inner_text('body'))
+            explanation_keywords = ['説明', '解説', '注記', 'コメント', 'point', '解釈']
+            has_explanation = any(keyword in body_text for keyword in explanation_keywords)
+
+            metrics = ['売上高', '経常利益', '営業利益', '当期純利益']
+            has_chart = await self._has_chart_near_keywords(page, metrics)
+            metric_hits = sum(1 for keyword in metrics if keyword in body_text)
+            base_valid = has_chart and metric_hits >= 3
+
+            is_valid = base_valid and has_explanation
+            details = 'グラフと説明文を検出' if is_valid else '説明文付きグラフを確認できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.5 if is_valid else 0.3,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_81(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """四半期別売上・利益推移グラフチェック（item_id: 81）"""
+        try:
+            body_text = self._normalize_text(await page.inner_text('body'))
+            quarter_keywords = ['四半期', '1Q', '2Q', '3Q', '4Q', 'quarter', 'q1', 'q2', 'q3', 'q4']
+            has_quarter = any(keyword.lower() in body_text.lower() for keyword in quarter_keywords)
+            metrics = ['売上高', '経常利益', '営業利益', '当期純利益']
+            has_chart = await self._has_chart_near_keywords(page, quarter_keywords + metrics)
+            has_metrics = sum(1 for keyword in metrics if keyword in body_text) >= 2
+
+            is_valid = has_chart and has_quarter and has_metrics
+            details = '四半期別グラフを検出' if is_valid else '四半期別グラフを検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.55 if is_valid else 0.35,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_82(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """四半期別グラフ説明併記チェック（item_id: 82）"""
+        try:
+            body_text = self._normalize_text(await page.inner_text('body'))
+            explanation_keywords = ['説明', '解説', '注釈', '注記', 'comment']
+            has_explanation = any(keyword in body_text for keyword in explanation_keywords)
+
+            quarter_keywords = ['四半期', '1Q', '2Q', '3Q', '4Q', 'quarter']
+            has_chart = await self._has_chart_near_keywords(page, quarter_keywords)
+
+            is_valid = has_chart and has_explanation
+            details = '四半期グラフと説明文を検出' if is_valid else '四半期グラフの説明を検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.5 if is_valid else 0.3,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
     async def check_item_85(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
         """No.1020: 直近の決算説明会の資料を掲載している（通期、半期もしくは四半期、PDF可）"""
         try:
@@ -1634,6 +2922,162 @@ class ScriptValidator:
                 result='PASS' if has_content else 'FAIL',
                 confidence=0.7,
                 details='検証完了' if has_content else '未検出',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_89(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """資本コストの数値記載チェック（item_id: 89）"""
+        try:
+            body_text = await page.inner_text('body')
+            normalized = self._normalize_text(body_text)
+            lower_text = normalized.lower()
+            keywords = ['資本コスト', '株主資本コスト', 'wacc']
+            has_keyword = any(keyword in lower_text for keyword in keywords)
+
+            import re
+
+            percent_pattern = re.compile(
+                r'(資本コスト|株主資本コスト|wacc)[^0-9%％]{0,40}([0-9]+(?:\\.[0-9]+)?)\\s*[%％]',
+                re.IGNORECASE
+            )
+            match = percent_pattern.search(lower_text)
+            found = has_keyword and bool(match)
+
+            if found and match:
+                value = match.group(2)
+                details = f'資本コスト{value}%を検出'
+            elif has_keyword:
+                details = '資本コストの記載はあるが数値を検出できず'
+            else:
+                details = '資本コスト関連の記載を検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if found else 'FAIL',
+                confidence=0.6 if found else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_90(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """チャートジェネレーター設置チェック（item_id: 90）"""
+        try:
+            metric_keywords = ['売上', '利益', 'roe', 'roa', 'eps', '配当', 'kpi', '指標']
+
+            has_controls = await page.evaluate(
+                """
+                (keywords) => {
+                    const lower = keywords.map((kw) => kw.toLowerCase());
+
+                    const selects = Array.from(document.querySelectorAll('select'));
+                    for (const select of selects) {
+                        let hits = 0;
+                        for (const option of Array.from(select.options)) {
+                            const text = (option.textContent || '').toLowerCase();
+                            if (lower.some((kw) => text.includes(kw))) {
+                                hits += 1;
+                            }
+                        }
+                        if (hits >= 3) {
+                            return true;
+                        }
+                    }
+
+                    const toggles = Array.from(document.querySelectorAll('[data-series], [data-metric]'));
+                    if (toggles.length >= 2) {
+                        return true;
+                    }
+
+                    const buttons = Array.from(document.querySelectorAll('button, li, a'));
+                    let buttonHits = 0;
+                    for (const button of buttons.slice(0, 30)) {
+                        const text = (button.textContent || '').toLowerCase();
+                        if (lower.some((kw) => text.includes(kw))) {
+                            buttonHits += 1;
+                        }
+                        if (buttonHits >= 3) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                """,
+                metric_keywords,
+            )
+
+            has_chart = await self._has_chart_near_keywords(page, metric_keywords)
+
+            is_valid = has_controls and has_chart
+            details = 'チャートジェネレーターUIを検出' if is_valid else 'チャートジェネレーターUIを検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.5 if is_valid else 0.3,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_91(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """B/S・P/L・C/S HTML 掲載チェック（item_id: 91）"""
+        try:
+            body_text = self._normalize_text(await page.inner_text('body')).lower()
+            bs_keywords = ['貸借対照表', 'b/s', 'bs']
+            pl_keywords = ['損益計算書', 'p/l', 'pl']
+            cs_keywords = ['キャッシュフロー計算書', 'c/s', 'cs', 'cash flow']
+
+            has_bs = any(keyword.lower() in body_text for keyword in bs_keywords)
+            has_pl = any(keyword.lower() in body_text for keyword in pl_keywords)
+            has_cs = any(keyword.lower() in body_text for keyword in cs_keywords)
+
+            table_count = await page.locator('table').count()
+            has_tables = table_count >= 3
+
+            is_valid = has_bs and has_pl and has_cs and has_tables
+
+            if is_valid:
+                details = 'B/S・P/L・C/S の HTML テーブルを検出'
+            else:
+                missing = []
+                if not has_bs:
+                    missing.append('B/S')
+                if not has_pl:
+                    missing.append('P/L')
+                if not has_cs:
+                    missing.append('C/S')
+                if not has_tables:
+                    missing.append('HTMLテーブル')
+                details = '不足: ' + '・'.join(missing)
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.55 if is_valid else 0.35,
+                details=details,
                 checked_at=datetime.now()
             )
         except Exception as e:
@@ -1837,6 +3281,136 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
+    async def check_item_103(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """統合報告書のマネジメントメッセージHTML掲載チェック（item_id: 103）"""
+        try:
+            body_text = await page.inner_text('body')
+            normalized = self._normalize_text(body_text)
+            keywords = [
+                'マネジメントメッセージ',
+                'マネジメント メッセージ',
+                '経営メッセージ',
+                'ceo message',
+                'president message',
+                'management message',
+            ]
+            has_keyword = any(keyword.lower() in normalized.lower() for keyword in keywords)
+
+            pdf_only = False
+            pdf_keywords = ['マネジメント', 'management', 'message', 'ceo', 'president']
+            pdf_links = await page.locator('a[href$=".pdf"]').all()
+            for link in pdf_links:
+                href = (await link.get_attribute('href') or '').lower()
+                text = (await link.inner_text() or '').lower()
+                combined = href + ' ' + text
+                if any(pk in combined for pk in pdf_keywords):
+                    pdf_only = True
+                    break
+
+            text_length = len(normalized.strip())
+            is_valid = has_keyword and not pdf_only and text_length >= 200
+
+            if is_valid:
+                details = 'マネジメントメッセージをHTMLで検出'
+            elif has_keyword and pdf_only:
+                details = 'マネジメントメッセージはPDFリンクのみ'
+            else:
+                details = 'マネジメントメッセージを検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.6 if is_valid else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_106(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """四半期B/S・P/L・C/SのCSV/XLSダウンロードチェック（item_id: 106）"""
+        try:
+            keywords = ['四半期', 'quarter', 'b/s', 'bs', 'p/l', 'pl', 'c/s', 'cs', 'financial statements']
+            link_locator = page.locator('a[href$=".csv"], a[href$=".xls"], a[href$=".xlsx"], a[href*=".csv?"], a[href*=".xls?"], a[href*=".xlsx?"]')
+            link_count = await link_locator.count()
+
+            found = False
+            snippet = ''
+            for index in range(min(link_count, 50)):
+                link = link_locator.nth(index)
+                text = self._normalize_text((await link.inner_text() or '')).lower()
+                href = (await link.get_attribute('href') or '').lower()
+                combined = text + ' ' + href
+                if any(keyword in combined for keyword in keywords) and any(ext in href for ext in ['.csv', '.xls', '.xlsx']):
+                    if '四半期' in combined or 'quarter' in combined:
+                        found = True
+                        snippet = text[:60] or href[:60]
+                        break
+
+            details = '四半期財務CSV/XLSリンクを検出' if found else '四半期財務CSV/XLSリンクを検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if found else 'FAIL',
+                confidence=0.55 if found else 0.35,
+                details=details if not snippet else f'{details} ({snippet})',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_107(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """B/S・P/L・C/S 時系列CSV/XLSダウンロードチェック（item_id: 107）"""
+        try:
+            keywords = ['時系列', '5期', '５期', '5年', 'five-year', 'long-term', '時系列データ']
+            fs_keywords = ['b/s', 'bs', '貸借', 'p/l', 'pl', '損益', 'c/s', 'cs', 'キャッシュフロー']
+            link_locator = page.locator('a[href$=".csv"], a[href$=".xls"], a[href$=".xlsx"], a[href*=".csv?"], a[href*=".xls?"], a[href*=".xlsx?"]')
+            link_count = await link_locator.count()
+
+            found = False
+            snippet = ''
+            for index in range(min(link_count, 50)):
+                link = link_locator.nth(index)
+                text = self._normalize_text((await link.inner_text() or '')).lower()
+                href = (await link.get_attribute('href') or '').lower()
+                combined = text + ' ' + href
+                has_fs = any(keyword in combined for keyword in fs_keywords)
+                has_timeseries = any(keyword in combined for keyword in keywords)
+                if has_fs and has_timeseries:
+                    found = True
+                    snippet = text[:60] or href[:60]
+                    break
+
+            details = '時系列財務CSV/XLSリンクを検出' if found else '時系列財務CSV/XLSリンクを検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if found else 'FAIL',
+                confidence=0.55 if found else 0.35,
+                details=details if not snippet else f'{details} ({snippet})',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
     async def check_item_111(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
         """No.1310: 株式手続きについて掲載している"""
         try:
@@ -1898,6 +3472,58 @@ class ScriptValidator:
                 result='PASS' if has_content else 'FAIL',
                 confidence=0.7,
                 details='検証完了' if has_content else '未検出',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_117(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """IRカレンダーの概要＋詳細表示チェック（item_id: 117）"""
+        try:
+            body_text = await page.inner_text('body')
+            normalized = self._normalize_text(body_text)
+            lower = normalized.lower()
+
+            has_calendar = 'irカレンダー' in normalized or 'ir calendar' in lower
+            overview_keywords = ['年間', 'annual', 'yearly', '年間予定', '年間スケジュール']
+            detail_keywords = ['詳細', '詳細を見る', '詳細予定', '詳細情報']
+
+            has_overview = any(keyword in normalized for keyword in overview_keywords)
+            has_detail_word = any(keyword in normalized for keyword in detail_keywords)
+
+            import re
+
+            month_pattern = re.compile(r'(?:[1-9]|1[0-2])月')
+            date_pattern = re.compile(r'\\d{4}/\\d{1,2}/\\d{1,2}')
+            has_date_pattern = bool(month_pattern.search(normalized) or date_pattern.search(normalized))
+
+            has_detail = has_detail_word or has_date_pattern
+
+            is_valid = has_calendar and has_overview and has_detail
+
+            if is_valid:
+                details = 'IRカレンダーの概要・詳細を検出'
+            else:
+                missing_parts = []
+                if not has_calendar:
+                    missing_parts.append('カレンダー見出し')
+                if not has_overview:
+                    missing_parts.append('年間概要')
+                if not has_detail:
+                    missing_parts.append('詳細予定')
+                details = '不足: ' + '・'.join(missing_parts)
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.5 if is_valid else 0.35,
+                details=details,
                 checked_at=datetime.now()
             )
         except Exception as e:
@@ -2079,6 +3705,57 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
+    async def check_item_130(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """IRトップ株価表示の関連情報チェック（item_id: 130）"""
+        try:
+            body_text = await page.inner_text('body')
+            normalized = self._normalize_text(body_text)
+            lower_text = normalized.lower()
+
+            stock_keywords = ['株価', 'stock price', 'share price', '株価情報']
+            related_keywords = [
+                '時価総額',
+                '最低購入代金',
+                '単元株',
+                'board lot',
+                'market cap',
+                'market capitalization',
+                'minimum investment',
+            ]
+
+            has_stock_section = any(keyword in normalized for keyword in stock_keywords)
+            has_related_info = any(keyword in normalized for keyword in related_keywords)
+
+            if not has_related_info:
+                # 専用フォーマット（表やラベル）を確認
+                indicators = ['per share', 'lot', 'shares', '株']
+                has_related_info = any(indicator in lower_text for indicator in indicators)
+
+            is_valid = has_stock_section and has_related_info
+
+            if is_valid:
+                details = '株価と関連指標（時価総額/最低購入等）を検出'
+            elif has_stock_section:
+                details = '株価表示のみ検出（関連指標なし）'
+            else:
+                details = 'IRトップ株価表示を検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.65 if is_valid else 0.45,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
     async def check_item_133(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
         """No.1560: 全取締役・監査役のスキルマトリックスを掲載している"""
         try:
@@ -2206,6 +3883,51 @@ class ScriptValidator:
                 result='PASS' if has_content else 'FAIL',
                 confidence=0.7,
                 details='検証完了' if has_content else '未検出',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_168(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """コーポレートガバナンス掲載チェック（item_id: 168）"""
+        try:
+            cg_keywords = [
+                'コーポレートガバナンス',
+                'corporate governance',
+                'ガバナンス体制',
+                '統治体制',
+            ]
+            structure_keywords = [
+                '取締役会',
+                '監査役',
+                '指名委員会',
+                '報酬委員会',
+                'board of directors',
+                'audit committee',
+                'governance structure',
+            ]
+
+            has_cg_text = await self._check_keyword_in_html(page, cg_keywords)
+            has_structure_detail = await self._check_keyword_in_html(page, structure_keywords)
+            is_valid = has_cg_text and has_structure_detail
+
+            details = (
+                'コーポレートガバナンス情報を検出'
+                if is_valid
+                else 'ガバナンス情報の記載を検出できず'
+            )
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.65 if is_valid else 0.4,
+                details=details,
                 checked_at=datetime.now()
             )
         except Exception as e:
@@ -3444,6 +5166,56 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
+    async def check_item_244(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """個人投資家向け特設カテゴリチェック（item_id: 244）"""
+        try:
+            link_selectors = [
+                'a:has-text("個人投資家")',
+                'a:has-text("個人株主")',
+                'a:has-text("個人向け")',
+                'a:has-text("Individual Investor")',
+                'nav a:has-text("投資家の皆さまへ")',
+            ]
+
+            has_link = False
+            for selector in link_selectors:
+                if await page.locator(selector).count() > 0:
+                    has_link = True
+                    break
+
+            keywords = [
+                '個人投資家向け',
+                '個人株主向け',
+                'individual investor',
+                '5分でわかる',
+                'はじめてのIR',
+                '個人向けサイト',
+            ]
+            has_keyword = await self._check_keyword_in_html(page, keywords)
+
+            is_valid = has_link or has_keyword
+            details = (
+                '個人投資家向け導線を検出'
+                if is_valid
+                else '個人投資家向け特設カテゴリを検出できず'
+            )
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.6 if is_valid else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
     async def check_item_245(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
         """No.2450: 個人投資家向け特設カテゴリ配下に動画を掲載している"""
         try:
@@ -3559,6 +5331,50 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
+    async def check_item_249(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """株主専用サイト導線チェック（item_id: 249）"""
+        try:
+            selectors = [
+                'a:has-text("株主専用")',
+                'a:has-text("株主さま専用")',
+                'a:has-text("shareholder portal")',
+                'a[href*="shareholder"]',
+                'a[href*="kabunushi"]',
+            ]
+
+            has_link = False
+            for selector in selectors:
+                if await page.locator(selector).count() > 0:
+                    has_link = True
+                    break
+
+            if not has_link:
+                keywords = [
+                    '株主専用サイト',
+                    '株主さま専用サイト',
+                    'shareholder site',
+                    'shareholder club',
+                ]
+                has_link = await self._check_keyword_in_html(page, keywords)
+
+            details = '株主専用サイト導線を検出' if has_link else '株主専用サイト導線を検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if has_link else 'FAIL',
+                confidence=0.6 if has_link else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
 
 
 
@@ -3573,6 +5389,14 @@ class ScriptValidator:
     # ============================================================================
     # HELPER METHODS
     # ============================================================================
+
+    def _normalize_text(self, text: str) -> str:
+        """半角/全角差異を吸収した比較用テキストを返す"""
+        try:
+            import unicodedata
+            return unicodedata.normalize('NFKC', text or '')
+        except Exception:
+            return text or ''
 
     async def _check_keyword_in_html(self, page: Page, keywords: list, context: str = 'body') -> bool:
         """Check if any keyword exists in the page HTML"""
@@ -3599,6 +5423,51 @@ class ScriptValidator:
                     return True
             return False
         except:
+            return False
+
+
+    async def _has_chart_near_keywords(self, page: Page, keywords: list, selectors: list | None = None) -> bool:
+        """Check if chart-like elements exist near given keywords"""
+        selectors = selectors or [
+            'canvas',
+            'svg',
+            '[class*="chart" i]',
+            '[class*="graph" i]',
+            '[class*="trend" i]',
+            '[class*="line" i]',
+            'img[alt*="グラフ"]',
+            'img[alt*="chart" i]',
+        ]
+        try:
+            return await page.evaluate(
+                """
+                (keywords, selectors) => {
+                    const lowerKeywords = keywords.map((kw) => kw.toLowerCase());
+                    const elements = Array.from(document.querySelectorAll('body *'));
+                    for (const element of elements) {
+                        const text = (element.textContent || '').toLowerCase();
+                        if (!lowerKeywords.some((kw) => text.includes(kw))) {
+                            continue;
+                        }
+                        let current = element;
+                        let depth = 0;
+                        while (current && depth < 3) {
+                            for (const selector of selectors) {
+                                if (current.querySelector && current.querySelector(selector)) {
+                                    return true;
+                                }
+                            }
+                            current = current.parentElement;
+                            depth += 1;
+                        }
+                    }
+                    return false;
+                }
+                """,
+                keywords,
+                selectors,
+            )
+        except Exception:
             return False
 
 
@@ -4036,6 +5905,80 @@ class ScriptValidator:
             return self._create_error_result(site, item, str(e))
 
 
+    async def check_item_139(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """株主構成グラフ掲載チェック（item_id: 139）"""
+        try:
+            keywords = ['株主構成', '株主比率', 'shareholder composition', 'shareholder breakdown']
+            has_keyword = await self._check_keyword_in_html(page, keywords)
+
+            chart_selectors = [
+                'canvas',
+                'svg',
+                '[class*="chart" i]',
+                '[class*="graph" i]',
+                '[class*="pie" i]',
+                'img[alt*="株主"]',
+                'img[alt*="shareholder" i]',
+            ]
+
+            has_chart_near_keyword = await page.evaluate(
+                """
+                (keywords, selectors) => {
+                    const lowerKeywords = keywords.map((kw) => kw.toLowerCase());
+                    const elements = Array.from(document.querySelectorAll('body *'));
+                    for (const element of elements) {
+                        const text = (element.textContent || '').toLowerCase();
+                        if (!lowerKeywords.some((kw) => text.includes(kw))) {
+                            continue;
+                        }
+                        let current = element;
+                        let depth = 0;
+                        while (current && depth < 3) {
+                            for (const selector of selectors) {
+                                if (current.querySelector && current.querySelector(selector)) {
+                                    return true;
+                                }
+                            }
+                            current = current.parentElement;
+                            depth += 1;
+                        }
+                    }
+                    return false;
+                }
+                """,
+                keywords,
+                chart_selectors,
+            )
+
+            if not has_chart_near_keyword:
+                chart_count = 0
+                for selector in chart_selectors:
+                    chart_count += await page.locator(selector).count()
+                has_chart_near_keyword = chart_count > 0
+
+            is_valid = has_keyword and has_chart_near_keyword
+            details = (
+                '株主構成グラフ検出'
+                if is_valid
+                else '株主構成テキストまたはグラフを検出できず'
+            )
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if is_valid else 'FAIL',
+                confidence=0.55 if is_valid else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
     async def check_item_142(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
         """Item 142: 格付情報を掲載している"""
         try:
@@ -4212,6 +6155,39 @@ class ScriptValidator:
         except Exception as e:
             return self._create_error_result(site, item, str(e))
 
+
+    async def check_item_154(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """社名・ロゴの由来掲載チェック（item_id: 154）"""
+        try:
+            keywords = [
+                '社名の由来',
+                '社名の意味',
+                'ロゴの由来',
+                'ロゴの意味',
+                'company name origin',
+                'meaning of the logo',
+                'origin of the logo',
+                'company name story',
+            ]
+            has_story = await self._check_keyword_in_html(page, keywords)
+
+            details = '社名・ロゴの由来記載を検出' if has_story else '社名・ロゴの由来記載を検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if has_story else 'FAIL',
+                confidence=0.65 if has_story else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
 
     async def check_item_155(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
         """Item 155: 経営理念・パーパスを掲載している"""
@@ -4873,6 +6849,197 @@ class ScriptValidator:
                 result='PASS' if is_valid else 'FAIL',
                 confidence=0.8,
                 details='Presentations検出' if is_valid else 'Presentations未検出',
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+
+
+    async def check_item_221(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """IR連絡先の電話番号掲載チェック（item_id: 221）"""
+        try:
+            import re
+
+            body_text = await page.inner_text('body')
+            normalized = self._normalize_text(body_text)
+            lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+
+            role_pattern = re.compile(r'(IR|investor relations|インベスターリレーションズ)', re.IGNORECASE)
+            qualifier_pattern = re.compile(r'(部署|部|室|担当|contact|お問い合わせ|窓口)', re.IGNORECASE)
+            phone_pattern = re.compile(r'(?:tel|電話|phone)[:：]?\s*(\+?\d[\d\-() ]{6,})', re.IGNORECASE)
+
+            found = False
+            snippet = ''
+
+            for idx, line in enumerate(lines):
+                if role_pattern.search(line) and qualifier_pattern.search(line):
+                    if phone_pattern.search(line):
+                        found = True
+                        snippet = line
+                        break
+                    if idx + 1 < len(lines) and phone_pattern.search(lines[idx + 1]):
+                        found = True
+                        snippet = f"{line} / {lines[idx + 1]}"
+                        break
+
+            if not found:
+                for line in lines:
+                    if role_pattern.search(line) and phone_pattern.search(line):
+                        found = True
+                        snippet = line
+                        break
+
+            details = f'IR連絡先: {snippet[:80]}' if found else 'IR部署の電話番号を検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if found else 'FAIL',
+                confidence=0.6 if found else 0.4,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+
+    async def check_item_223(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """英語ページの不自然な表現チェック（item_id: 223）"""
+        try:
+            import re
+
+            body_text = await page.inner_text('body')
+            normalized = self._normalize_text(body_text).lower()
+            pattern = re.compile(r'\b(ir\s+library|csr)\b')
+            matches = pattern.findall(normalized)
+            has_unusual = len(matches) > 0
+
+            if has_unusual:
+                unique_terms = ', '.join(sorted(set(m.strip() for m in matches)))
+                details = f'不自然な英語表現検出: {unique_terms}'
+            else:
+                details = '不自然な英語表現を検出せず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='FAIL' if has_unusual else 'PASS',
+                confidence=0.5,
+                details=details,
+                checked_at=datetime.now()
+            )
+        except Exception as e:
+            return self._create_error_result(site, item, str(e))
+
+    async def check_item_224(self, site: Site, page: Page, item: ValidationItem) -> ValidationResult:
+        """日英言語切り替えの直接遷移チェック（item_id: 224）"""
+        try:
+            import re
+
+            current_url = page.url
+            current_path = urlparse(current_url).path or '/'
+
+            candidates = await page.evaluate(
+                """
+                () => {
+                    const anchors = Array.from(document.querySelectorAll('a'));
+                    const matches = [];
+                    for (const anchor of anchors) {
+                        const text = (anchor.textContent || '').trim().toLowerCase();
+                        const href = anchor.getAttribute('href') || '';
+                        const hreflang = (anchor.getAttribute('hreflang') || '').toLowerCase();
+                        const lang = (anchor.getAttribute('lang') || '').toLowerCase();
+                        const dataLang = (anchor.getAttribute('data-lang') || '').toLowerCase();
+                        const textHints = ['english', 'english site', 'en '];
+                        const isEnglishText =
+                            text === 'en' ||
+                            text.startsWith('english') ||
+                            textHints.some((hint) => text.includes(hint));
+                        const isEnglishAttr =
+                            hreflang.startsWith('en') ||
+                            lang.startsWith('en') ||
+                            dataLang.startsWith('en');
+
+                        if ((isEnglishText || isEnglishAttr) && href && href !== '#') {
+                            matches.push({ href, hreflang, text: anchor.textContent || '' });
+                        }
+                    }
+                    return matches;
+                }
+                """
+            )
+
+            def _normalize_path(path: str) -> str:
+                if not path:
+                    return '/'
+                base = path.split('?', 1)[0]
+                base = re.sub(r'^/(?:ja|jp|ja-jp|jp-jp|japanese)(/|$)', '/', base, flags=re.IGNORECASE)
+                base = re.sub(r'^/(?:en|en-us|en-gb|english)(/|$)', '/', base, flags=re.IGNORECASE)
+                return base.rstrip('/') or '/'
+
+            has_switch = len(candidates) > 0
+            has_direct = False
+
+            if has_switch:
+                normalized_current = _normalize_path(current_path)
+                for candidate in candidates:
+                    absolute = urljoin(current_url, candidate['href'])
+                    en_path = urlparse(absolute).path or '/'
+                    if _normalize_path(en_path) == normalized_current:
+                        has_direct = True
+                        break
+
+            if has_switch and not has_direct:
+                # fallback: alternate linkタグ
+                alternates = await page.evaluate(
+                    """
+                    () => {
+                        const links = Array.from(document.querySelectorAll('link[rel="alternate"][hreflang]'));
+                        return links.map((link) => ({
+                            href: link.getAttribute('href') || '',
+                            hreflang: (link.getAttribute('hreflang') || '').toLowerCase(),
+                        }));
+                    }
+                    """
+                )
+                for link in alternates:
+                    if not link['hreflang'].startswith('en'):
+                        continue
+                    absolute = urljoin(current_url, link['href'])
+                    en_path = urlparse(absolute).path or '/'
+                    if _normalize_path(en_path) == _normalize_path(current_path):
+                        has_direct = True
+                        break
+
+            if has_switch and has_direct:
+                details = '日本語ページから英語ページへの直接リンクを検出'
+            elif has_switch:
+                details = '言語切替リンクはあるが同一ページへの遷移を確認できず'
+            else:
+                details = '英語への言語切替リンクを検出できず'
+
+            return ValidationResult(
+                site_id=site.site_id,
+                company_name=site.company_name,
+                url=site.url,
+                item_id=item.item_id,
+                item_name=item.item_name,
+                category=item.category,
+                subcategory=item.subcategory,
+                result='PASS' if has_switch and has_direct else 'FAIL',
+                confidence=0.55 if has_switch and has_direct else 0.35,
+                details=details,
                 checked_at=datetime.now()
             )
         except Exception as e:
@@ -6481,5 +8648,3 @@ def _create_error_result(self, site: Site, item: ValidationItem, error_msg: str)
         checked_at=datetime.now(),
         error_message=error_msg
     )
-
-
