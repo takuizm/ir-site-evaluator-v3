@@ -1,7 +1,8 @@
 # IRサイト評価ツール - 技術スタック詳細
 
-**バージョン**: 1.0
+**バージョン**: 1.1
 **作成日**: 2025-10-25
+**最終更新**: 2025-11-09
 
 ---
 
@@ -47,17 +48,17 @@
 │ Web Automation │           │   AI/LLM Layer     │
 │                │           │                    │
 │ Playwright     │           │ Anthropic Claude   │
-│  1.40.0        │           │  (API)             │
+│  1.55.0        │           │  (API)             │
 │                │           │                    │
 │                │           │ OpenAI GPT         │
-│                │           │  (API)             │
+│                │           │  (API, gpt-4o-mini)│
 └────────────────┘           └────────────────────┘
         │                               │
         │                               │
 ┌───────▼────────┐           ┌──────────▼─────────┐
 │ HTML Processing│           │  Data Processing   │
 │                │           │                    │
-│ BeautifulSoup4 │           │  pandas 2.1.0      │
+│ BeautifulSoup4 │           │  pandas 2.3.3      │
 │  4.12.0        │           │  openpyxl 3.1.0    │
 │                │           │                    │
 │ lxml 5.0.0     │           │                    │
@@ -70,7 +71,7 @@
 
 ### 1. Web自動化: Playwright
 
-**バージョン**: 1.40.0
+**バージョン**: 1.55.0
 
 #### 選定理由
 

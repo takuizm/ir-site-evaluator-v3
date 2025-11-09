@@ -2,7 +2,7 @@
 
 **バージョン**: 2.0
 **作成日**: 2025年10月25日
-**最終更新**: 2025年11月07日
+**最終更新**: 2025年11月09日
 **対象**: IR（投資家向け情報）サイトの自動評価システム（249項目）
 
 ---
@@ -17,8 +17,8 @@
 
 ### 1.2 スコープ
 - **検証項目数**: 249項目（2025年版評価基準）
-  - スクリプト検証: 117項目
-  - LLM検証: 132項目
+  - スクリプト検証: 149項目
+  - LLM検証: 100項目（criteria 230/310/330/340/350/760/840/1050 を 2025-11-09 時点で追加移行）
 - **対象サイト数**: 任意（スケーラブル設計）
 - **実装環境**: Python 3.10以上（ローカル実行）
 - **開発手法**: モジュラー設計による保守性・拡張性の確保
@@ -33,7 +33,7 @@
 
 ## 2. 機能要件
 
-### 2.1 評価項目の構成
+### 2.1 評価項目の構成（DOM:149 / VISUAL:39 / LLM:48 / NOT_SUPPORTED:13）
 
 #### カテゴリ1: ウェブサイトの使いやすさ（76項目）
 **サブカテゴリ**:
@@ -116,13 +116,13 @@
 1. サイトリスト読み込み
 2. Playwrightでページ取得
 3. 項目別に検証実行
-   ├─ ScriptValidator: DOM/CSS/属性チェック（117項目）
-   └─ LLMValidator: セマンティック判定（132項目）
+   ├─ ScriptValidator: DOM/CSS/属性チェック（149項目）
+   └─ LLMValidator: セマンティック判定（48項目）
 4. 結果の統合・集計
 5. エラーハンドリング・チェックポイント保存
 
 [出力]
-├─ results_summary.csv        # 全検証結果の詳細
+├─ results_summary.csv        # 全検証結果の詳細（criteria列付き）
 ├─ results_detailed.csv       # カテゴリ別集計結果
 ├─ execution.log             # 実行ログ
 └─ checkpoint/               # チェックポイントファイル
@@ -171,7 +171,7 @@ item_id,category,subcategory,item_name,validator_type,validator_key,priority,des
 
 #### results_summary.csv
 ```csv
-site_id,company_name,url,item_id,item_name,category,subcategory,result,confidence,details,checked_at
+site_id,company_name,url,item_id,item_name,category,subcategory,result,confidence,details,checked_at,ID,CategoryNo.,カテゴリ,SubCategoryNo.,サブカテゴリ,項目グループ,項目名
 1,トヨタ自動車,https://...,1,メニュー構造により...,ウェブサイトの使いやすさ,メニューとナビゲーション,PASS,0.9,第1-3階層メニュー確認,2025-11-07 17:37:08
 1,トヨタ自動車,https://...,2,メニューの表示の仕方は...,ウェブサイトの使いやすさ,メニューとナビゲーション,PASS,0.85,IRとESGで一貫性あり,2025-11-07 17:37:15
 ...
@@ -383,7 +383,7 @@ ir-site-evaluator-v3/
 │   │
 │   ├── validators/              # 検証エンジン
 │   │   ├── script_validator.py  # スクリプト検証（117項目）
-│   │   └── llm_validator.py     # LLM検証（132項目）
+│   │   └── llm_validator.py     # LLM検証（100項目）
 │   │
 │   └── utils/                   # ユーティリティ
 │       ├── scraper.py           # Webスクレイピング
@@ -511,7 +511,7 @@ python -m src.main --config config.yaml --sites input/test_sites.csv
 - **方法**: DOM/CSS/属性の機械的チェック
 - **信頼度**: 常に1.0（確定的判定）
 
-### 8.2 LLM検証（132項目）
+### 8.2 LLM検証（100項目）
 - **平均confidence**: 0.82 ✅
 - **方法**: セマンティック判定（Claude/GPT）
 - **検証**: サンプルサイトで手動確認と比較

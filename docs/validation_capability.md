@@ -6,12 +6,12 @@
 
 |カテゴリ|件数|概要|次のアクション|
 |---|---|---|---|
-|DOM Script (`DOM`)|149|メニュー導線、パンくず、FAQ、PDFリンクなど DOM 情報があれば判断できる観点|`ScriptValidator` で観点と一致した details を自動生成（現状ほぼ全てスクリプト化済み）|
+|DOM Script (`DOM`)|143|メニュー導線、パンくず、FAQ、PDFリンクなど DOM 情報があれば判断できる観点|`ScriptValidator` で観点と一致した details を自動生成（現状ほぼ全てスクリプト化済み）|
 |Visual (`VISUAL`)|39|色/コントラスト、カルーセル、グラフ表示など視覚・レイアウトが根拠になる観点|CSS 値取得や要素スクリーンショット＋画像解析を設計し、LLM 依存を減らす|
-|LLM Text (`LLM`)|48|文章内容・記載有無などテキスト中心の観点|構造 JSON と観点別テンプレートを使い、details が観点から逸脱しないよう制御|
+|LLM Text (`LLM`)|106|文章内容・記載有無などテキスト中心の観点|構造 JSON と観点別テンプレートを使い、details が観点から逸脱しないよう制御|
 |Not Supported (`NOT_SUPPORTED`)|13|サイト内検索チューニングなど複雑な操作/計測が必要な観点|`NOT_SUPPORTED` を返し理由を明示。Web Vitals 等の外部計測導入までは対象外|
 
-> 数値は `analysis/result_type_map.csv`（2025-11-07更新）から集計。criteria_2025.md の「調査方法」とズレが見つかった場合は同ファイルを修正してください。
+> 数値は `analysis/result_type_map.csv`（2025-11-09更新）から集計。criteria_2025.md の「調査方法」とズレが見つかった場合は同ファイルを修正してください。
 
 ## `NOT_SUPPORTED` ポリシー
 - `ValidationResult.result` に `NOT_SUPPORTED` を追加し、該当観点は無理に PASS/FAIL を出さず理由を明示します。
