@@ -111,12 +111,16 @@ class LLMClient:
         self.total_input_tokens += message.usage.input_tokens
         self.total_output_tokens += message.usage.output_tokens
 
+        response_text = message.content[0].text
+        
         self.logger.debug(
             f"Claude API call successful "
             f"(input: {message.usage.input_tokens}, output: {message.usage.output_tokens})"
         )
+        self.logger.debug(f"Response length: {len(response_text)} chars")
+        self.logger.debug(f"Response preview (first 200 chars): {response_text[:200]}")
 
-        return message.content[0].text
+        return response_text
 
     def _call_openai(self, prompt: str, context: str) -> str:
         """OpenAI API を呼び出す

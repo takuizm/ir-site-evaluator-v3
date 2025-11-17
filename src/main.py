@@ -106,7 +106,7 @@ class IRSiteEvaluator:
         sites_df = pd.read_csv(self.config.input.sites_list)
         self.sites = [
             Site(
-                site_id=row['site_id'],
+                site_id=str(row['site_id']),  # 文字列として扱う（証券コード対応）
                 company_name=row['company_name'],
                 url=row['url'],
                 industry=row.get('industry'),

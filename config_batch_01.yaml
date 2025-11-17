@@ -1,0 +1,62 @@
+# バッチ 01 用設定ファイル
+
+# API設定
+api:
+  provider: "claude"
+  claude:
+    model: "claude-haiku-4-5"
+    api_key_env: "ANTHROPIC_API_KEY"
+    max_tokens: 4096
+  openai:
+    model: "gpt-4o-mini"
+    api_key_env: "OPENAI_API_KEY"
+    max_tokens: 4096
+  max_retries: 3
+  timeout: 60
+  rate_limit_delay: 2.0
+
+# スクレイピング設定
+scraping:
+  headless: true
+  wait_until: "domcontentloaded"
+  delay_after_load: 5.0
+  timeout: 60
+  user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  max_parallel: 1
+  screenshot_on_error: true
+
+# 処理設定
+processing:
+  checkpoint_interval: 1
+  batch_semantic_checks: true
+  skip_errors: true
+  max_retries_per_site: 2
+  enable_parallel: false
+  max_parallel_sites: 1
+  enable_item_parallel: false
+  max_parallel_items_per_site: 10
+
+# ログ設定
+logging:
+  level: "INFO"
+  file: "output/batch_01_execution.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# 出力設定
+output:
+  summary_csv: "output/batch_01_results.csv"
+  detailed_csv: "output/batch_01_detailed.csv"
+  error_log: "output/batch_01_error_log.txt"
+  checkpoint_dir: "checkpoint/batch_01"
+
+# 入力設定
+input:
+  sites_list: "input/batch_01.csv"
+  validation_items: "input/validation_items.csv"
+
+# パフォーマンス設定
+performance:
+  enable_caching: true
+  cache_dir: ".cache"
+  max_cache_size_mb: 500

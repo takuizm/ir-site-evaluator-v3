@@ -14,7 +14,7 @@ class Site:
 
     評価対象のWebサイトを表現するデータクラス。
     """
-    site_id: int
+    site_id: str  # 証券コード（285Aなど）も扱えるように文字列型に変更
     company_name: str
     url: str
     industry: Optional[str] = None
@@ -24,7 +24,7 @@ class Site:
         """初期化後のバリデーション"""
         if not self.url.startswith(('http://', 'https://')):
             raise ValueError(f"Invalid URL: {self.url}")
-        if self.site_id <= 0:
+        if not self.site_id:
             raise ValueError(f"Invalid site_id: {self.site_id}")
 
 
@@ -70,7 +70,7 @@ class ValidationResult:
 
     1つの検証項目の実行結果を表現するデータクラス。
     """
-    site_id: int
+    site_id: str  # 証券コード（285Aなど）も扱えるように文字列型に変更
     company_name: str
     url: str
     item_id: int
@@ -153,8 +153,21 @@ class LLMResponse:
         Returns:
             LLMResponseインスタンス
         """
+        import logging
+        import re
+        logger = logging.getLogger(__name__)
+        
         try:
-            data = json.loads(response_text)
+            # Markdownコードブロックを除去（```json ... ``` または ``` ... ```）
+            cleaned_text = response_text.strip()
+            if cleaned_text.startswith('```'):
+                # コードブロック内のJSONを抽出
+                match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', cleaned_text, re.DOTALL)
+                if match:
+                    cleaned_text = match.group(1).strip()
+                    logger.debug("Removed markdown code block from LLM response")
+            
+            data = json.loads(cleaned_text)
             return cls(
                 raw_response=response_text,
                 found=data.get('found', False),
@@ -164,6 +177,9 @@ class LLMResponse:
             )
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             # JSONパース失敗時のフォールバック
+            logger.warning(f"Failed to parse LLM response: {str(e)}")
+            logger.warning(f"Raw response (first 500 chars): {response_text[:500]!r}")
+            logger.warning(f"Raw response length: {len(response_text)}")
             return cls(
                 raw_response=response_text,
                 found=False,

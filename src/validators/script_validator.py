@@ -6650,7 +6650,10 @@ class ScriptValidator:
         try:
             # Check navigation areas
             keywords = ['esg', 'サステナビリティ', 'sustainability', 'csr']
-            nav_text = await page.locator('nav, header').inner_text()
+            
+            # Get all nav and header elements and combine their text
+            nav_elements = await page.locator('nav, header').all()
+            nav_text = ' '.join([await elem.inner_text() for elem in nav_elements])
             nav_lower = nav_text.lower()
 
             has_esg = any(kw in nav_lower for kw in keywords)

@@ -26,11 +26,16 @@ wheels/
 # 環境変数（機密情報）
 .env
 
-# 実行結果
+# 入力データ（サイトリスト等、お客様固有データ）
+input/*.csv
+!input/validation_items.csv  # 評価基準は除く（プロダクト定義）
+!input/*.csv.example  # サンプルファイルは含める
+
+# 実行結果（全て除外）
 output/*
 !output/.gitkeep
-checkpoint/*
-!checkpoint/.gitkeep
+
+# キャッシュ
 .cache/
 
 # IDE
@@ -54,9 +59,11 @@ Thumbs.db
 .serena/
 .claude/
 
-# バックアップ
+# バックアップファイル（エディタが作成するもの）
 *.backup
 *_backup_*
+*.bak
+*.bak[0-9]*
 
 # 開発用ドキュメント（納品不要）
 CLEANUP_PLAN.md
@@ -64,5 +71,6 @@ TODO.md
 docs/llm_migration_plan.md
 docs/roadmap_delivery_2025-11.md
 
-# 中間生成物
+# 開発時の中間生成物
 analysis/
+checkpoint/

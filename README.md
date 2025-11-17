@@ -5,10 +5,10 @@
 ## 特徴
 
 - **249項目の自動評価**: 2025年版評価基準に完全対応
-- **ハイブリッド検証**: Script検証（149項目）+ LLM検証（100項目）
-- **高精度**: UNKNOWN率 0%、平均確信度 0.82
-- **低コスト**: 約$0.09/サイト（gpt-4o-mini使用時）
-- **高速**: 約7.5分/サイト
+- **ハイブリッド検証**: Script検証（145項目）+ LLM検証（104項目）
+- **高精度**: 明確なPASS/FAIL判定、詳細な検証レポート
+- **低コスト**: 約$0.02/サイト（gpt-4o-mini使用時）
+- **効率的**: 約2.4分/サイト
 
 ## セットアップ
 
@@ -118,15 +118,14 @@ ir-site-evaluator-v3/
 ├── input/
 │   ├── validation_items.csv     # 249項目評価基準
 │   └── sample_sites.csv         # サンプルサイトリスト
-├── output/                      # 実行結果（自動生成）
-├── checkpoint/                  # チェックポイント（自動生成）
+├── output/                      # 実行結果
 ├── src/                         # ソースコード
 │   ├── main.py                  # メインスクリプト
 │   ├── models.py                # データモデル
 │   ├── config.py                # 設定管理
 │   ├── validators/              # 検証エンジン
-│   │   ├── script_validator.py  # スクリプト検証（117項目）
-│   │   └── llm_validator.py     # LLM検証（132項目）
+│   │   ├── script_validator.py  # スクリプト検証（145項目）
+│   │   └── llm_validator.py     # LLM検証（104項目）
 │   └── utils/                   # ユーティリティ
 │       ├── scraper.py           # Webスクレイピング
 │       ├── llm_client.py        # LLM APIクライアント
