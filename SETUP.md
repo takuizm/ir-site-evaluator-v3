@@ -80,12 +80,26 @@ processing:
   max_parallel_sites: 1   # 同時処理サイト数
 ```
 
-### 7. 入力データの確認
+### 7. 入力データの準備
 
-以下のファイルが存在することを確認:
+サンプルファイルをコピーして編集:
 
-- `input/sample_sites.csv`: 評価対象のサイトリスト
+```bash
+cp input/sample_sites.csv.example input/sample_sites.csv
+```
+
+`input/sample_sites.csv`を開いて、評価対象のサイト情報を入力してください。
+
+**ファイルフォーマット:**
+```csv
+site_id,company_name,url,industry,note
+1,企業名,https://example.com/ir/,業種,備考（任意）
+```
+
+以下のファイルは既にリポジトリに含まれています:
 - `input/validation_items.csv`: 検証項目リスト（249項目）
+
+**注意**: `input/sample_sites.csv`と`output/`ディレクトリの内容はGit管理対象外です。
 
 ### 8. 動作確認
 
@@ -173,7 +187,8 @@ playwright install chromium
 ### 初回実行時
 
 1. まず1-2サイトで試す:
-   - `input/sample_sites.csv`を編集して少数のサイトのみにする
+   - `input/sample_sites.csv.example`をコピーして`input/sample_sites.csv`を作成
+   - 少数のサイト（1-2社）のみ記載して試す
 
 2. ログを確認:
    - `output/execution.log`で詳細な実行ログを確認
@@ -194,6 +209,13 @@ playwright install chromium
 1. 基本動作確認が成功したら、実際のIRサイトで実行
 2. 結果を確認して評価精度を検証
 3. 必要に応じて設定を調整
+
+### 大量サイトの評価（バッチ処理）
+
+407社などの大量サイトを評価する場合:
+- [BATCH_EXECUTION.md](BATCH_EXECUTION.md) を参照
+- サイトリストを50社ずつに分割して実行
+- 実行時間: 約2時間/バッチ（50社）
 
 ## サポート
 

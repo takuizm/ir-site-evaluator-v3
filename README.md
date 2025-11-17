@@ -37,6 +37,10 @@ playwright install chromium
 # 5. 環境変数を設定
 cp .env.example .env
 # .envファイルを編集してAPIキーを設定
+
+# 6. 入力ファイルを準備
+cp input/sample_sites.csv.example input/sample_sites.csv
+# sample_sites.csvを編集して評価対象サイトを設定
 ```
 
 ### 環境変数設定
@@ -59,6 +63,23 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 python -m src.main --config config.yaml
 ```
 
+### バッチ処理（大量サイトの評価）
+
+407社などの大量サイトを評価する場合は、バッチ処理機能を使用できます：
+
+```bash
+# 1. サイトリストを50社ずつのバッチに分割
+python split_sites.py
+
+# 2. 各バッチを実行（例：バッチ1）
+python -m src.main --config config_batch_01.yaml
+
+# 3. 全バッチの結果を統合
+python merge_results.py
+```
+
+詳細は [BATCH_EXECUTION.md](BATCH_EXECUTION.md) を参照してください。
+
 ### 設定ファイル
 
 `config.yaml`で以下を設定可能：
@@ -72,12 +93,18 @@ python -m src.main --config config.yaml
 
 ### 評価対象サイトの設定
 
-`input/sample_sites.csv`を編集して評価対象サイトを設定：
-
-```csv
-site_id,company_name,url
-1,企業名,https://example.com/ir/
+1. サンプルファイルをコピー：
+```bash
+cp input/sample_sites.csv.example input/sample_sites.csv
 ```
+
+2. `input/sample_sites.csv`を編集して評価対象サイトを設定：
+```csv
+site_id,company_name,url,industry,note
+1,企業名,https://example.com/ir/,業種,備考（任意）
+```
+
+**注意**: `input/sample_sites.csv`と`output/`ディレクトリの内容はGit管理対象外です。お客様固有のデータとして、各環境で個別に管理してください。
 
 ## 出力結果
 
@@ -116,9 +143,9 @@ ir-site-evaluator-v3/
 ├── requirements.txt             # Python依存関係
 ├── .env.example                 # 環境変数テンプレート
 ├── input/
-│   ├── validation_items.csv     # 249項目評価基準
-│   └── sample_sites.csv         # サンプルサイトリスト
-├── output/                      # 実行結果
+│   ├── validation_items.csv        # 249項目評価基準
+│   └── sample_sites.csv.example    # サンプルサイトリスト（テンプレート）
+├── output/                         # 実行結果（自動生成、Git管理外）
 ├── src/                         # ソースコード
 │   ├── main.py                  # メインスクリプト
 │   ├── models.py                # データモデル
@@ -132,12 +159,15 @@ ir-site-evaluator-v3/
 │       ├── logger.py            # ロガー
 │       └── reporter.py          # レポート生成
 ├── tests/                       # テストコード
-└── docs/                        # 技術ドキュメント
-    ├── architecture.md          # システムアーキテクチャ
-    ├── criteria_2025.md         # 評価基準詳細（249項目）
-    ├── data_structures.md       # データ構造定義
-    ├── requirements.md          # 要件定義書
-    └── technical_stack.md       # 技術スタック詳細
+├── docs/                        # 技術ドキュメント
+│   ├── architecture.md          # システムアーキテクチャ
+│   ├── criteria_2025.md         # 評価基準詳細（249項目）
+│   ├── data_structures.md       # データ構造定義
+│   ├── requirements.md          # 要件定義書
+│   └── technical_stack.md       # 技術スタック詳細
+├── split_sites.py               # バッチ分割スクリプト
+├── merge_results.py             # 結果統合スクリプト
+└── run_all_batches.sh           # 全バッチ実行スクリプト
 ```
 
 ## 評価基準
